@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# App configuration (contains local paths and templates)
+config_gerenciador.json
