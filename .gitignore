@@ -1,11 +1,26 @@
-# Python
+# ============================================================
+# MPFolders (Silent Guardian) - .gitignore
+# ============================================================
+
+# Arquivos de Tasks Internas / Documentação Local
+/IARef/
+Tasks.md
+Tasks*.md
+BRAIN.md
+Brain.md
+/scratch/
+
+# Python (Byte-compiled / Cache)
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
 *.pyd
+.venv/
+env/
+venv/
 
-# PyInstaller
+# PyInstaller & Compilações
 *.spec
 build/
 dist/
@@ -13,6 +28,17 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
+*.swp
+*.bak
+*.tmp
+*~
 
 # App configuration (contains local paths and templates)
 config_gerenciador.json
+*.log
+.env
+.env.*
+
+# Conflitos de Sincronização do Dropbox
+*conflicted copy*

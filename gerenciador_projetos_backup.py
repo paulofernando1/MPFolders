@@ -7,6 +7,8 @@ import threading
 import queue
 import json
 import calendar
+import re
+import uuid
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import ctypes
@@ -231,7 +233,7 @@ class CalendarDialog(tk.Toplevel):
 
     def build_widgets(self):
         # Header com Mês e Ano + Botões de Navegação (Usando < e > seguros)
-        nav_frame = tk.Frame(self, bg=COLOR_BG_CARD, py=8)
+        nav_frame = tk.Frame(self, bg=COLOR_BG_CARD, pady=8)
         nav_frame.pack(fill=tk.X)
 
         btn_prev = HoverButton(
@@ -255,7 +257,7 @@ class CalendarDialog(tk.Toplevel):
         btn_next.pack(side=tk.RIGHT, padx=10)
 
         # Container dos dias da semana
-        week_frame = tk.Frame(self, bg=COLOR_BG_DARK, py=6)
+        week_frame = tk.Frame(self, bg=COLOR_BG_DARK, pady=6)
         week_frame.pack(fill=tk.X)
         days_headers = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"]
         for d in days_headers:
@@ -264,7 +266,7 @@ class CalendarDialog(tk.Toplevel):
 
         # Grid de dias do calendário
         self.grid_frame = tk.Frame(self, bg=COLOR_BG_DARK)
-        self.grid_frame.pack(fill=tk.BOTH, expand=True, padx=10, py=5)
+        self.grid_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         self.draw_days()
 
@@ -446,15 +448,18 @@ class App(tk.Tk):
         self.tab_creator = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
         self.tab_cleaner = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
         self.tab_backup = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
+        self.tab_renamer = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
 
         self.notebook.add(self.tab_creator, text=" Criar Estrutura de Projeto ")
         self.notebook.add(self.tab_cleaner, text=" Limpar Pastas Vazias / Lixo ")
         self.notebook.add(self.tab_backup, text=" Backup Incremental Seguro ")
+        self.notebook.add(self.tab_renamer, text=" Renomeador Incremental ")
 
         # Inicialização das Interfaces de cada aba
         self.init_tab_creator()
         self.init_tab_cleaner()
         self.init_tab_backup()
+        self.init_tab_renamer()
 
     # =========================================================================
     # PERSISTÊNCIA DAS CONFIGURAÇÕES DO USUÁRIO
@@ -476,6 +481,7 @@ class App(tk.Tk):
                     self.sash_creator = data.get("sash_creator", 410)
                     self.sash_cleaner = data.get("sash_cleaner", 370)
                     self.sash_backup = data.get("sash_backup", 380)
+                    self.sash_renamer = data.get("sash_renamer", 390)
             else:
                 self.templates = {"Padrão": list(DEFAULT_STRUCTURE)}
                 self.active_template = "Padrão"
@@ -483,6 +489,7 @@ class App(tk.Tk):
                 self.sash_creator = 410
                 self.sash_cleaner = 370
                 self.sash_backup = 380
+                self.sash_renamer = 390
         except Exception:
             self.templates = {"Padrão": list(DEFAULT_STRUCTURE)}
             self.active_template = "Padrão"
@@ -490,6 +497,7 @@ class App(tk.Tk):
             self.sash_creator = 410
             self.sash_cleaner = 370
             self.sash_backup = 380
+            self.sash_renamer = 390
 
         self.custom_folders = list(self.templates.get(self.active_template, list(DEFAULT_STRUCTURE)))
 
@@ -511,6 +519,10 @@ class App(tk.Tk):
                 sash_bk = self.paned_backup.sash_coord(0)[0]
             except Exception:
                 sash_bk = 380
+            try:
+                sash_rn = self.paned_renamer.sash_coord(0)[0]
+            except Exception:
+                sash_rn = 390
 
             data = {
                 "templates": self.templates,
@@ -518,12 +530,21 @@ class App(tk.Tk):
                 "window_geometry": self.geometry(),
                 "sash_creator": sash_cr,
                 "sash_cleaner": sash_cl,
-                "sash_backup": sash_bk
+                "sash_backup": sash_bk,
+                "sash_renamer": sash_rn
             }
-            with open(self.config_filepath, "w", encoding="utf-8") as f:
+            temp_cfg = f"{self.config_filepath}.{os.getpid()}.tmp"
+            with open(temp_cfg, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
+            os.replace(temp_cfg, self.config_filepath)
         except Exception as e:
             print(f"Falha ao salvar config local: {e}")
+            try:
+                temp_cfg = f"{self.config_filepath}.{os.getpid()}.tmp"
+                if os.path.exists(temp_cfg):
+                    os.remove(temp_cfg)
+            except Exception:
+                pass
 
     def restore_sashes(self):
         """Restaura as coordenadas das divisões PanedWindow de forma segura e atrasada"""
@@ -535,6 +556,8 @@ class App(tk.Tk):
                 self.paned_cleaner.sash_place(0, self.sash_cleaner, 0)
             if hasattr(self, 'paned_backup') and hasattr(self, 'sash_backup'):
                 self.paned_backup.sash_place(0, self.sash_backup, 0)
+            if hasattr(self, 'paned_renamer') and hasattr(self, 'sash_renamer'):
+                self.paned_renamer.sash_place(0, self.sash_renamer, 0)
         except Exception:
             pass
 
@@ -1630,17 +1653,398 @@ class App(tk.Tk):
                 self.log_queue.put((summary_line.strip(), "normal"))
 
     # =========================================================================
+    # TAB 4: RENOMEADOR INCREMENTAL DE ARQUIVOS
+    # =========================================================================
+    def init_tab_renamer(self):
+        # Utiliza PanedWindow horizontal para permitir redimensionar as divisões internas
+        self.paned_renamer = tk.PanedWindow(self.tab_renamer, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
+        self.paned_renamer.pack(fill=tk.BOTH, expand=True)
+
+        left_panel = tk.Frame(self.paned_renamer, bg=COLOR_BG_DARK, width=390)
+        right_panel = ttk.LabelFrame(self.paned_renamer, text=" Terminal / Preview de Renomeação ")
+
+        self.paned_renamer.add(left_panel, minsize=370)
+        self.paned_renamer.add(right_panel, minsize=400)
+
+        # --- SELEÇÃO DE DIRETÓRIO ---
+        lf_dir = ttk.LabelFrame(left_panel, text=" Pasta de Trabalho ")
+        lf_dir.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(15, 5))
+
+        ttk.Label(lf_dir, text="Diretório dos Arquivos:").pack(anchor="w", padx=8, pady=(6, 2))
+        self.var_renamer_dir = tk.StringVar(value=os.getcwd())
+        entry_dir = tk.Entry(lf_dir, textvariable=self.var_renamer_dir, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_dir.pack(fill=tk.X, padx=8, pady=2)
+
+        btn_browse_dir = HoverButton(
+            lf_dir, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Procurar Pasta", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
+            font=("Segoe UI", 8, "bold"), command=self.browse_renamer_dir
+        )
+        btn_browse_dir.pack(anchor="e", padx=8, pady=(2, 6))
+
+        # --- FILTRO DE EXTENSÕES / TIPOS DE ARQUIVO ---
+        lf_exts = ttk.LabelFrame(left_panel, text=" Seleção de Tipos / Extensões ")
+        lf_exts.pack(side=tk.TOP, fill=tk.X, padx=15, pady=5)
+
+        self.var_ext_img = tk.BooleanVar(value=True)
+        self.var_ext_vid = tk.BooleanVar(value=False)
+        self.var_ext_aud = tk.BooleanVar(value=False)
+        self.var_ext_doc = tk.BooleanVar(value=False)
+
+        cb_img = tk.Checkbutton(lf_exts, text="Imagens (.jpg, .jpeg, .png, .webp...)", variable=self.var_ext_img, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_img.pack(anchor="w", padx=8, pady=2)
+
+        cb_vid = tk.Checkbutton(lf_exts, text="Vídeos (.mp4, .mov, .mkv, .avi...)", variable=self.var_ext_vid, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_vid.pack(anchor="w", padx=8, pady=2)
+
+        cb_aud = tk.Checkbutton(lf_exts, text="Áudios (.mp3, .wav, .aac, .m4a...)", variable=self.var_ext_aud, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_aud.pack(anchor="w", padx=8, pady=2)
+
+        cb_doc = tk.Checkbutton(lf_exts, text="Documentos (.pdf, .docx, .txt...)", variable=self.var_ext_doc, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_doc.pack(anchor="w", padx=8, pady=2)
+
+        ttk.Label(lf_exts, text="Outras Extensões (ex: .raw, .heic ou * para todos):").pack(anchor="w", padx=8, pady=(4, 2))
+        self.var_renamer_ext_custom = tk.StringVar(value="")
+        entry_custom_ext = tk.Entry(lf_exts, textvariable=self.var_renamer_ext_custom, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_custom_ext.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # --- REGRAS DE NOMENCLATURA E INCREMENTO ---
+        lf_rules = ttk.LabelFrame(left_panel, text=" Regras de Nomenclatura e Incremento ")
+        lf_rules.pack(side=tk.TOP, fill=tk.X, padx=15, pady=5)
+
+        ttk.Label(lf_rules, text="Nomenclatura Base (Prefixo):").grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
+        self.var_renamer_prefix = tk.StringVar(value="Foto_")
+        entry_prefix = tk.Entry(lf_rules, textvariable=self.var_renamer_prefix, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9, "bold"))
+        entry_prefix.grid(row=0, column=1, sticky="ew", padx=8, pady=2)
+
+        ttk.Label(lf_rules, text="Dígitos do Contador:").grid(row=1, column=0, sticky="w", padx=8, pady=2)
+        self.var_renamer_digits = tk.StringVar(value="3")
+        spin_digits = ttk.Spinbox(lf_rules, from_=1, to=8, textvariable=self.var_renamer_digits, width=5)
+        spin_digits.grid(row=1, column=1, sticky="w", padx=8, pady=2)
+
+        ttk.Label(lf_rules, text="Número Inicial (se do zero):").grid(row=2, column=0, sticky="w", padx=8, pady=2)
+        self.var_renamer_start = tk.StringVar(value="1")
+        entry_start = tk.Entry(lf_rules, textvariable=self.var_renamer_start, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, width=6, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_start.grid(row=2, column=1, sticky="w", padx=8, pady=2)
+
+        ttk.Label(lf_rules, text="Ordenar Arquivos Por:").grid(row=3, column=0, sticky="w", padx=8, pady=2)
+        self.var_renamer_sort = tk.StringVar(value="Nome (Alfabético)")
+        combo_sort = ttk.Combobox(lf_rules, textvariable=self.var_renamer_sort, values=["Nome (Alfabético)", "Data de Modificação (Antigo -> Novo)", "Tamanho do Arquivo"], state="readonly")
+        combo_sort.grid(row=3, column=1, sticky="ew", padx=8, pady=2)
+
+        lf_rules.columnconfigure(1, weight=1)
+
+        self.var_renamer_auto_continue = tk.BooleanVar(value=True)
+        cb_auto_cont = tk.Checkbutton(
+            lf_rules, text="Continuar a partir do último número existente", 
+            variable=self.var_renamer_auto_continue, bg=COLOR_BG_CARD, fg=COLOR_ACCENT, 
+            selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD,
+            activeforeground=COLOR_ACCENT, font=("Segoe UI", 9, "bold")
+        )
+        cb_auto_cont.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 6))
+
+        # --- BOTÕES DE AÇÃO ---
+        btn_run_renamer = RoundedButton(
+            left_panel, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            text="EXECUTAR RENOMEAÇÃO AGORA", bg=COLOR_ACCENT, fg="#ffffff",
+            font=("Segoe UI", 9, "bold"), height=40, command=self.run_renamer_real
+        )
+        btn_run_renamer.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(2, 15))
+
+        btn_sim_renamer = RoundedButton(
+            left_panel, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Simular Renomeação (Seguro)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 9, "bold"), height=40, command=self.run_renamer_simulation
+        )
+        btn_sim_renamer.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=2)
+
+        # --- TERMINAL DE SAÍDA ---
+        self.renamer_terminal = tk.Text(right_panel, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, insertbackground=COLOR_TEXT_PRIMARY, font=("Consolas", 9))
+        self.renamer_terminal.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        self.renamer_terminal.tag_config("green", foreground=COLOR_ACCENT)
+        self.renamer_terminal.tag_config("red", foreground=COLOR_DANGER)
+        self.renamer_terminal.tag_config("warning", foreground=COLOR_WARNING)
+        self.renamer_terminal.tag_config("cyan", foreground="#00e1ff")
+        self.renamer_terminal.tag_config("normal", foreground=COLOR_TEXT_PRIMARY)
+
+        self.log_renamer("Sistema de renomeação incremental pronto.\nSelecione o diretório, os tipos de arquivo e configure a nomenclatura base.")
+
+    def browse_renamer_dir(self):
+        dir_selected = filedialog.askdirectory(initialdir=self.var_renamer_dir.get())
+        if dir_selected:
+            self.var_renamer_dir.set(os.path.normpath(dir_selected))
+
+    def log_renamer(self, msg, tag="normal"):
+        self.renamer_terminal.insert(tk.END, msg + "\n", tag)
+        self.renamer_terminal.see(tk.END)
+
+    def validate_renamer_inputs(self):
+        target = self.var_renamer_dir.get().strip()
+        if not target or not os.path.exists(target) or not os.path.isdir(target):
+            messagebox.showerror("Erro", "Diretório selecionado inválido ou inexistente.", parent=self)
+            return False
+
+        prefix = self.var_renamer_prefix.get()
+        forbidden_chars = r'[\/:*?"<>|]'
+        if re.search(forbidden_chars, prefix):
+            messagebox.showerror("Nomenclatura Inválida", "A nomenclatura base contém caracteres proibidos para nomes de arquivos (\\ / : * ? \" < > |).", parent=self)
+            return False
+
+        return True
+
+    def run_renamer_simulation(self):
+        if not self.validate_renamer_inputs():
+            return
+
+        target = self.var_renamer_dir.get().strip()
+        self.renamer_terminal.delete("1.0", tk.END)
+        self.log_renamer("=== INICIANDO SIMULAÇÃO DE RENOMEAÇÃO (NENHUM ARQUIVO SERÁ ALTERADO) ===", "warning")
+        self.log_renamer(f"Diretório alvo: {target}\n", "normal")
+
+        threading.Thread(target=self._renamer_worker, args=(target, True), daemon=True).start()
+
+    def run_renamer_real(self):
+        if not self.validate_renamer_inputs():
+            return
+
+        target = self.var_renamer_dir.get().strip()
+        confirm = messagebox.askyesno(
+            "Confirmar Renomeação em Lote",
+            f"Atenção! Os arquivos na pasta:\n{target}\n\nserão renomeados incrementalmente. Deseja continuar?",
+            icon="warning",
+            parent=self
+        )
+        if not confirm:
+            return
+
+        self.renamer_terminal.delete("1.0", tk.END)
+        self.log_renamer("=== EXECUTANDO RENOMEAÇÃO INCREMENTAL DE ARQUIVOS ===", "cyan")
+        self.log_renamer(f"Diretório alvo: {target}\n", "normal")
+
+        threading.Thread(target=self._renamer_worker, args=(target, False), daemon=True).start()
+
+    def _renamer_worker(self, target_dir, dry_run=True):
+        try:
+            prefix = self.var_renamer_prefix.get().strip()
+            
+            # Formatação de extensões selecionadas
+            selected_exts = set()
+            if self.var_ext_img.get():
+                selected_exts.update([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"])
+            if self.var_ext_vid.get():
+                selected_exts.update([".mp4", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm"])
+            if self.var_ext_aud.get():
+                selected_exts.update([".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg"])
+            if self.var_ext_doc.get():
+                selected_exts.update([".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".csv"])
+                
+            custom_ext_str = self.var_renamer_ext_custom.get().strip()
+            match_all_exts = False
+            if custom_ext_str:
+                if custom_ext_str == "*":
+                    match_all_exts = True
+                else:
+                    raw_exts = [e.strip() for e in re.split(r'[,;\s]+', custom_ext_str) if e.strip()]
+                    for e in raw_exts:
+                        if e == "*":
+                            match_all_exts = True
+                            break
+                        if not e.startswith('.'):
+                            e = '.' + e
+                        selected_exts.add(e.lower())
+
+            if not selected_exts and not match_all_exts:
+                self.log_queue.put(("[ERRO] Nenhuma extensão de arquivo foi selecionada para renomeação.", "red", "renamer"))
+                return
+
+            # Validação do padding de dígitos
+            try:
+                digits_padding = int(self.var_renamer_digits.get().strip())
+                if digits_padding < 1:
+                    digits_padding = 3
+            except ValueError:
+                digits_padding = 3
+
+            # Validação do número inicial
+            try:
+                start_num = int(self.var_renamer_start.get().strip())
+                if start_num < 0:
+                    start_num = 1
+            except ValueError:
+                start_num = 1
+
+            self.log_queue.put((f"Lendo conteúdo do diretório: {target_dir}", "normal", "renamer"))
+            
+            try:
+                all_entries = os.listdir(target_dir)
+            except Exception as e:
+                self.log_queue.put((f"[ERRO] Não foi possível acessar o diretório '{target_dir}': {str(e)}", "red", "renamer"))
+                return
+
+            # Filtra apenas arquivos
+            all_files = [f for f in all_entries if os.path.isfile(os.path.join(target_dir, f))]
+
+            if not all_files:
+                self.log_queue.put(("[AVISO] Nenhum arquivo foi encontrado na pasta especificada.", "warning", "renamer"))
+                return
+
+            # Encontrar maior número existente para a nomenclatura especificada
+            max_existing_num = 0
+            found_existing = False
+            
+            # Padrão regex para detectar prefixo + número (ex: Foto_001.jpg, Foto_15.png, etc)
+            pattern_str = rf"^{re.escape(prefix)}(\d+)(\..+)?$"
+            existing_regex = re.compile(pattern_str, re.IGNORECASE)
+
+            for f in all_files:
+                match = existing_regex.match(f)
+                if match:
+                    found_existing = True
+                    num_val = int(match.group(1))
+                    if num_val > max_existing_num:
+                        max_existing_num = num_val
+
+            if self.var_renamer_auto_continue.get() and found_existing:
+                next_start = max_existing_num + 1
+                if next_start > start_num:
+                    start_num = next_start
+                self.log_queue.put((f"[INCREMENTAL] Arquivos existentes com nomenclatura '{prefix}' identificados! Último número: {max_existing_num}. Continuando a partir de: {start_num}", "cyan", "renamer"))
+            else:
+                if found_existing:
+                    self.log_queue.put((f"[AVISO] Arquivos com nomenclatura '{prefix}' já existem (Maior índice: {max_existing_num}), mas a auto-continuação está desativada. Usando número inicial: {start_num}", "warning", "renamer"))
+                else:
+                    self.log_queue.put((f"[INFO] Nenhum arquivo anterior com a nomenclatura '{prefix}' foi encontrado. Iniciando contador em: {start_num}", "normal", "renamer"))
+
+            # Filtrar arquivos a serem renomeados conforme as extensões selecionadas
+            candidate_files = []
+            for f in all_files:
+                ext = os.path.splitext(f)[1].lower()
+                if match_all_exts or ext in selected_exts:
+                    # Se auto_continue está ativo e o arquivo JÁ corresponde EXATAMENTE ao padrão de nomenclatura existente, ignora para não re-renomear o que já foi renomeado
+                    if self.var_renamer_auto_continue.get() and existing_regex.match(f):
+                        continue
+                    candidate_files.append(f)
+
+            if not candidate_files:
+                self.log_queue.put(("[AVISO] Nenhum arquivo elegível para renomeação encontrado com as extensões selecionadas.", "warning", "renamer"))
+                return
+
+            # Ordenar candidatos conforme critério selecionado
+            sort_mode = self.var_renamer_sort.get()
+            if sort_mode.startswith("Data"):
+                candidate_files.sort(key=lambda f: os.path.getmtime(os.path.join(target_dir, f)))
+            elif sort_mode.startswith("Tamanho"):
+                candidate_files.sort(key=lambda f: os.path.getsize(os.path.join(target_dir, f)))
+            else: # Nome / Alfabético (Ordenação natural simples)
+                def natural_sort_key(s):
+                    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+                candidate_files.sort(key=natural_sort_key)
+
+            self.log_queue.put((f"\nTotal de arquivos a renomear: {len(candidate_files)}", "normal", "renamer"))
+            self.log_queue.put("-" * 55, "normal", "renamer")
+
+            # Planejamento das renomeações
+            rename_plan = []
+            current_count = start_num
+
+            for f in candidate_files:
+                ext = os.path.splitext(f)[1] # Mantém extensão original
+                num_formatted = str(current_count).zfill(digits_padding)
+                new_name = f"{prefix}{num_formatted}{ext}"
+                rename_plan.append((f, new_name))
+                current_count += 1
+
+            if dry_run:
+                for old_n, new_n in rename_plan:
+                    self.log_queue.put((f" [SIMULAÇÃO] '{old_n}' ➔ '{new_n}'", "warning", "renamer"))
+                self.log_queue.put("\n=============================================", "normal", "renamer")
+                self.log_queue.put((f"Simulação de renomeação concluída. {len(rename_plan)} arquivos prontos para alteração.", "green", "renamer"))
+                self.log_queue.put("=============================================", "normal", "renamer")
+                return
+
+            # EXECUÇÃO REAL (Duas fases para segurança contra colisões e sobrescritas)
+            success_count = 0
+            fail_count = 0
+            
+            # Fase 1: Renomear para nomes temporários únicos
+            temp_plan = []
+            for old_n, new_n in rename_plan:
+                old_path = os.path.join(target_dir, old_n)
+                unique_tmp_name = f"__mpf_tmp_{uuid.uuid4().hex[:8]}_{old_n}"
+                tmp_path = os.path.join(target_dir, unique_tmp_name)
+                
+                try:
+                    os.rename(old_path, tmp_path)
+                    temp_plan.append((tmp_path, new_n, old_n))
+                except PermissionError:
+                    self.log_queue.put((f" [ERRO PERMISSÃO] Arquivo em uso ou bloqueado: '{old_n}'", "red", "renamer"))
+                    fail_count += 1
+                except Exception as e:
+                    self.log_queue.put((f" [ERRO] Falha ao mover para temporário '{old_n}': {str(e)}", "red", "renamer"))
+                    fail_count += 1
+
+            # Fase 2: Renomear do nome temporário para o nome final
+            for tmp_path, new_n, orig_n in temp_plan:
+                final_path = os.path.join(target_dir, new_n)
+                try:
+                    if os.path.exists(final_path):
+                        # Caso o destino já exista fisicamente (colisão não prevista)
+                        self.log_queue.put((f" [ERRO COLISÃO] O arquivo de destino '{new_n}' já existe no disco!", "red", "renamer"))
+                        # Tenta desfazer voltando para o nome original
+                        os.rename(tmp_path, os.path.join(target_dir, orig_n))
+                        fail_count += 1
+                        continue
+
+                    os.rename(tmp_path, final_path)
+                    self.log_queue.put((f" [SUCESSO] '{orig_n}' ➔ '{new_n}'", "green", "renamer"))
+                    success_count += 1
+                except PermissionError:
+                    self.log_queue.put((f" [ERRO PERMISSÃO] Não foi possível renomear temporário para '{new_n}': Arquivo travado.", "red", "renamer"))
+                    # Tenta desfazer
+                    try:
+                        os.rename(tmp_path, os.path.join(target_dir, orig_n))
+                    except Exception:
+                        pass
+                    fail_count += 1
+                except Exception as e:
+                    self.log_queue.put((f" [ERRO] Falha ao finalizar '{orig_n}' ➔ '{new_n}': {str(e)}", "red", "renamer"))
+                    fail_count += 1
+
+            self.log_queue.put("\n=============================================", "normal", "renamer")
+            self.log_queue.put((f"Renomeação incremental executada!\nSucesso: {success_count} arquivo(s)\nFalhas: {fail_count} arquivo(s)", "green" if fail_count == 0 else "warning", "renamer"))
+            self.log_queue.put("=============================================", "normal", "renamer")
+
+        except Exception as e:
+            self.log_queue.put((f"[ERRO INESPERADO] {str(e)}", "red", "renamer"))
+
+    # =========================================================================
     # AUXILIAR: CHECK LOOP DE CONTROLE DE THREADS (Thread-Safe GUI)
     # =========================================================================
     def check_queue_loop(self):
         while not self.log_queue.empty():
-            msg, tag = self.log_queue.get_nowait()
-            
-            active_tab = self.notebook.index(self.notebook.select())
-            if active_tab == 1: # Limpeza
-                self.log_clean(msg, tag)
-            else: # Backup
-                self.log_bkp(msg, tag)
+            item = self.log_queue.get_nowait()
+            if len(item) == 3:
+                msg, tag, target = item
+                if target == "cleaner":
+                    self.log_clean(msg, tag)
+                elif target == "backup":
+                    self.log_bkp(msg, tag)
+                elif target == "renamer":
+                    self.log_renamer(msg, tag)
+                else:
+                    self.log_clean(msg, tag)
+            else:
+                msg, tag = item
+                active_tab = self.notebook.index(self.notebook.select())
+                if active_tab == 1: # Limpeza
+                    self.log_clean(msg, tag)
+                elif active_tab == 2: # Backup
+                    self.log_bkp(msg, tag)
+                elif active_tab == 3: # Renomeador
+                    self.log_renamer(msg, tag)
+                else:
+                    self.log_clean(msg, tag)
                 
         self.after(100, self.check_queue_loop)
 

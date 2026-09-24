@@ -5,11 +5,12 @@
 
 ## 🌟 Visão Geral
 
-O **MPFolders** é uma ferramenta de produtividade desenvolvida em Python e Tkinter para otimizar o fluxo de trabalho diário de profissionais e empresas que lidam com múltiplos projetos estruturados. A ferramenta consolida três grandes rotinas em abas funcionais dinâmicas:
+O **MPFolders** é uma ferramenta de produtividade desenvolvida em Python e Tkinter para otimizar o fluxo de trabalho diário de profissionais e empresas que lidam com múltiplos projetos estruturados. A ferramenta consolida quatro grandes rotinas em abas funcionais dinâmicas:
 
 1. 🏗️ **Criador de Projetos**: Criação automatizada de árvores estruturadas de pastas com suporte a modelos reutilizáveis (templates).
 2. 🧹 **Limpador Seguro**: Identificação e exclusão segura de arquivos temporários inúteis e pastas vazias recursivamente.
 3. 🛡️ **Backup Incremental**: Motor robusto de sincronização que utiliza o comando nativo **Windows Robocopy** para backups rápidos de alteração única.
+4. 🏷️ **Renomeador Incremental**: Renomeação sequencial inteligente em lote por tipo/extensão, com continuação automática a partir do último arquivo existente na pasta e simulação segura (Dry-Run).
 
 ---
 
