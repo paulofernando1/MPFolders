@@ -65,7 +65,8 @@ if (-not (Test-Path $distDir)) {
 $exePath = Join-Path $tempBuildDir "dist\$projectName.exe"
 if (Test-Path $exePath) {
     Copy-Item -Path $exePath -Destination $distDir -Force
-    Write-Host "Sucesso! Executável gerado: $(Join-Path $distDir "$projectName.exe")" -ForegroundColor Green
+    Copy-Item -Path $exePath -Destination (Join-Path $distDir "MPFolders.exe") -Force
+    Write-Host "Sucesso! Executável gerado: $(Join-Path $distDir "$projectName.exe") e MPFolders.exe" -ForegroundColor Green
 } else {
     Write-Host "ERRO: O executável não foi encontrado. Falha no PyInstaller." -ForegroundColor Red
 }

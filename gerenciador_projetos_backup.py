@@ -73,6 +73,18 @@ MONTHS_PT = [
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
 ]
 
+def format_size(num_bytes):
+    """Retorna tamanho formatado legível (B, KB, MB, GB, TB)"""
+    try:
+        val = float(num_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if abs(val) < 1024.0:
+                return f"{val:3.1f} {unit}"
+            val /= 1024.0
+        return f"{val:.1f} PB"
+    except Exception:
+        return f"{num_bytes} B"
+
 # ==========================================
 # WIDGET CUSTOMIZADO: BOTÃO COM HOVER DINÂMICO
 # ==========================================
@@ -361,6 +373,13 @@ class App(tk.Tk):
         self.minsize(980, 680)
         round_window_corners(self)
         
+        self.bind("<Configure>", self._on_configure)
+        
+        if self.window_state in ("maximized", "zoomed"):
+            self.after(50, lambda: self.state("zoomed"))
+        elif self.window_state in ("minimized", "iconic"):
+            self.after(50, lambda: self.iconify())
+        
         # Carregar ícone da janela (se disponível)
         if getattr(sys, 'frozen', False):
             asset_dir = sys._MEIPASS
@@ -449,17 +468,20 @@ class App(tk.Tk):
         self.tab_cleaner = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
         self.tab_backup = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
         self.tab_renamer = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
+        self.tab_card_copy = tk.Frame(self.notebook, bg=COLOR_BG_DARK)
 
         self.notebook.add(self.tab_creator, text=" Criar Estrutura de Projeto ")
         self.notebook.add(self.tab_cleaner, text=" Limpar Pastas Vazias / Lixo ")
         self.notebook.add(self.tab_backup, text=" Backup Incremental Seguro ")
         self.notebook.add(self.tab_renamer, text=" Renomeador Incremental ")
+        self.notebook.add(self.tab_card_copy, text=" Copia do Cartão ")
 
         # Inicialização das Interfaces de cada aba
         self.init_tab_creator()
         self.init_tab_cleaner()
         self.init_tab_backup()
         self.init_tab_renamer()
+        self.init_tab_card_copy()
 
     # =========================================================================
     # PERSISTÊNCIA DAS CONFIGURAÇÕES DO USUÁRIO
@@ -477,29 +499,45 @@ class App(tk.Tk):
                         self.templates = data.get("templates", {"Padrão": list(DEFAULT_STRUCTURE)})
                         self.active_template = data.get("active_template", "Padrão")
                     
+                    self.window_state = data.get("window_state", "normal")
                     self.window_geometry = data.get("window_geometry", "1024x768")
                     self.sash_creator = data.get("sash_creator", 410)
                     self.sash_cleaner = data.get("sash_cleaner", 370)
                     self.sash_backup = data.get("sash_backup", 380)
                     self.sash_renamer = data.get("sash_renamer", 390)
+                    self.sash_card_copy = data.get("sash_card_copy", 390)
             else:
                 self.templates = {"Padrão": list(DEFAULT_STRUCTURE)}
                 self.active_template = "Padrão"
+                self.window_state = "normal"
                 self.window_geometry = "1024x768"
                 self.sash_creator = 410
                 self.sash_cleaner = 370
                 self.sash_backup = 380
                 self.sash_renamer = 390
+                self.sash_card_copy = 390
         except Exception:
             self.templates = {"Padrão": list(DEFAULT_STRUCTURE)}
             self.active_template = "Padrão"
+            self.window_state = "normal"
             self.window_geometry = "1024x768"
             self.sash_creator = 410
             self.sash_cleaner = 370
             self.sash_backup = 380
             self.sash_renamer = 390
+            self.sash_card_copy = 390
 
+        self.last_normal_geometry = self.window_geometry
         self.custom_folders = list(self.templates.get(self.active_template, list(DEFAULT_STRUCTURE)))
+
+    def _on_configure(self, event):
+        if event.widget == self:
+            try:
+                st = self.state()
+                if st == "normal":
+                    self.last_normal_geometry = self.geometry()
+            except Exception:
+                pass
 
     def save_config(self):
         """Salva a lista atualizada de pastas no arquivo de configuração"""
@@ -523,15 +561,35 @@ class App(tk.Tk):
                 sash_rn = self.paned_renamer.sash_coord(0)[0]
             except Exception:
                 sash_rn = 390
+            try:
+                sash_cc = self.paned_card_copy.sash_coord(0)[0]
+            except Exception:
+                sash_cc = 390
+
+            st = "normal"
+            try:
+                s = self.state()
+                if s == "zoomed":
+                    st = "maximized"
+                elif s == "iconic":
+                    st = "minimized"
+                else:
+                    st = "normal"
+                    self.last_normal_geometry = self.geometry()
+            except Exception:
+                pass
+            self.window_state = st
 
             data = {
                 "templates": self.templates,
                 "active_template": self.active_template,
-                "window_geometry": self.geometry(),
+                "window_state": self.window_state,
+                "window_geometry": getattr(self, "last_normal_geometry", self.geometry()),
                 "sash_creator": sash_cr,
                 "sash_cleaner": sash_cl,
                 "sash_backup": sash_bk,
-                "sash_renamer": sash_rn
+                "sash_renamer": sash_rn,
+                "sash_card_copy": sash_cc
             }
             temp_cfg = f"{self.config_filepath}.{os.getpid()}.tmp"
             with open(temp_cfg, "w", encoding="utf-8") as f:
@@ -558,6 +616,8 @@ class App(tk.Tk):
                 self.paned_backup.sash_place(0, self.sash_backup, 0)
             if hasattr(self, 'paned_renamer') and hasattr(self, 'sash_renamer'):
                 self.paned_renamer.sash_place(0, self.sash_renamer, 0)
+            if hasattr(self, 'paned_card_copy') and hasattr(self, 'sash_card_copy'):
+                self.paned_card_copy.sash_place(0, self.sash_card_copy, 0)
         except Exception:
             pass
 
@@ -2019,6 +2079,561 @@ class App(tk.Tk):
             self.log_queue.put((f"[ERRO INESPERADO] {str(e)}", "red", "renamer"))
 
     # =========================================================================
+    # TAB 5: COPIA DO CARTÃO (INGEST E EXTRAÇÃO APLANADA DE SUBPASTAS)
+    # =========================================================================
+    def init_tab_card_copy(self):
+        # Utiliza PanedWindow horizontal para permitir redimensionar as divisões internas
+        self.paned_card_copy = tk.PanedWindow(self.tab_card_copy, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
+        self.paned_card_copy.pack(fill=tk.BOTH, expand=True)
+
+        left_panel = tk.Frame(self.paned_card_copy, bg=COLOR_BG_DARK, width=390)
+        right_panel = ttk.LabelFrame(self.paned_card_copy, text=" Status / Terminal de Cópia do Cartão ")
+
+        self.paned_card_copy.add(left_panel, minsize=370)
+        self.paned_card_copy.add(right_panel, minsize=400)
+
+        # Flags de controle de operação
+        self.card_copy_cancel = False
+        self.card_copy_running = False
+
+        # --- SELEÇÃO DE ORIGEM ---
+        lf_src = ttk.LabelFrame(left_panel, text=" Origem no Cartão / Gravador / Câmera ")
+        lf_src.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(12, 4))
+
+        ttk.Label(lf_src, text="Pasta Mãe no Cartão (ex: K:\\MULTI\\FOLDER01 ou K:\\DCIM):").pack(anchor="w", padx=8, pady=(4, 2))
+        self.var_card_src = tk.StringVar(value="")
+        entry_card_src = tk.Entry(lf_src, textvariable=self.var_card_src, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_card_src.pack(fill=tk.X, padx=8, pady=2)
+
+        btn_browse_src = HoverButton(
+            lf_src, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Procurar Pasta Mãe", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
+            font=("Segoe UI", 8, "bold"), command=self.browse_card_src
+        )
+        btn_browse_src.pack(anchor="e", padx=8, pady=(2, 6))
+
+        # --- SELEÇÃO DE DESTINO ---
+        lf_dst = ttk.LabelFrame(left_panel, text=" Pasta de Destino (Aplanada) ")
+        lf_dst.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
+
+        ttk.Label(lf_dst, text="Diretório onde todos os arquivos serão copiados diretamente:").pack(anchor="w", padx=8, pady=(4, 2))
+        self.var_card_dst = tk.StringVar(value="")
+        entry_card_dst = tk.Entry(lf_dst, textvariable=self.var_card_dst, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_card_dst.pack(fill=tk.X, padx=8, pady=2)
+
+        f_dst_btns = tk.Frame(lf_dst, bg=COLOR_BG_CARD)
+        f_dst_btns.pack(fill=tk.X, padx=8, pady=(2, 6))
+
+        btn_use_proj = HoverButton(
+            f_dst_btns, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Usar Raiz de Projetos", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, bd=1, relief="solid",
+            font=("Segoe UI", 8), command=self.use_project_dest_for_card
+        )
+        btn_use_proj.pack(side=tk.LEFT)
+
+        btn_browse_dst = HoverButton(
+            f_dst_btns, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Procurar Destino", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
+            font=("Segoe UI", 8, "bold"), command=self.browse_card_dst
+        )
+        btn_browse_dst.pack(side=tk.RIGHT)
+
+        # --- FILTRO DE TIPOS / EXTENSÕES ---
+        lf_exts = ttk.LabelFrame(left_panel, text=" Seleção de Tipos / Extensões ")
+        lf_exts.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
+
+        self.var_card_ext_aud = tk.BooleanVar(value=True)
+        self.var_card_ext_vid = tk.BooleanVar(value=False)
+        self.var_card_ext_img = tk.BooleanVar(value=False)
+        self.var_card_ext_all = tk.BooleanVar(value=False)
+
+        cb_aud = tk.Checkbutton(lf_exts, text="Áudios (.wav, .mp3, .aac, .m4a, .flac, .aif...)", variable=self.var_card_ext_aud, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_aud.pack(anchor="w", padx=8, pady=1)
+
+        cb_vid = tk.Checkbutton(lf_exts, text="Vídeos (.mp4, .mov, .mkv, .avi, .mxf, .braw...)", variable=self.var_card_ext_vid, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_vid.pack(anchor="w", padx=8, pady=1)
+
+        cb_img = tk.Checkbutton(lf_exts, text="Fotos / RAW (.jpg, .png, .raw, .cr2, .cr3, .arw, .dng...)", variable=self.var_card_ext_img, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_img.pack(anchor="w", padx=8, pady=1)
+
+        cb_all = tk.Checkbutton(lf_exts, text="Todos os Arquivos (*)", variable=self.var_card_ext_all, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD)
+        cb_all.pack(anchor="w", padx=8, pady=1)
+
+        ttk.Label(lf_exts, text="Outras Extensões (ex: .xml, .lrf ou separadas por vírgula):").pack(anchor="w", padx=8, pady=(3, 1))
+        self.var_card_ext_custom = tk.StringVar(value="")
+        entry_custom_ext = tk.Entry(lf_exts, textvariable=self.var_card_ext_custom, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
+        entry_custom_ext.pack(fill=tk.X, padx=8, pady=(0, 5))
+
+        # --- TRATAMENTO DE CONFLITOS DE NOMES ---
+        lf_conflict = ttk.LabelFrame(left_panel, text=" Tratamento de Conflito de Nomes ")
+        lf_conflict.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
+
+        ttk.Label(lf_conflict, text="Ação ao detectar arquivo com mesmo nome:").pack(anchor="w", padx=8, pady=(4, 2))
+        self.conflict_strategies = [
+            "Perguntar o que fazer (Interativo)",
+            "Prefixar nome da subpasta (ex: ZOOM0001_arquivo.wav)",
+            "Adicionar sufixo numérico (ex: arquivo_1.wav)",
+            "Sobrescrever arquivo existente",
+            "Pular arquivo (não copiar)"
+        ]
+        self.var_card_conflict_action = tk.StringVar(value=self.conflict_strategies[0])
+        combo_conflict = ttk.Combobox(lf_conflict, textvariable=self.var_card_conflict_action, values=self.conflict_strategies, state="readonly")
+        combo_conflict.pack(fill=tk.X, padx=8, pady=2)
+
+        self.var_card_always_prefix = tk.BooleanVar(value=False)
+        cb_always_prefix = tk.Checkbutton(
+            lf_conflict, text="Sempre prefixar nome da subpasta de origem\n(ex: ZOOM0001_ZOOM0001_Tr1.WAV)",
+            justify=tk.LEFT, variable=self.var_card_always_prefix, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD
+        )
+        cb_always_prefix.pack(anchor="w", padx=8, pady=(3, 6))
+
+        # --- BOTÕES DE AÇÃO ---
+        f_actions = tk.Frame(left_panel, bg=COLOR_BG_DARK)
+        f_actions.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(4, 10))
+
+        self.btn_card_copy_run = RoundedButton(
+            f_actions, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            text="Iniciar Cópia do Cartão", bg=COLOR_ACCENT, fg="#ffffff",
+            font=("Segoe UI", 10, "bold"), height=38, command=self.run_card_copy_real
+        )
+        self.btn_card_copy_run.pack(fill=tk.X, pady=(0, 4))
+
+        self.btn_card_copy_sim = RoundedButton(
+            f_actions, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Simulação / Prévia da Cópia (Sem gravar)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 9, "bold"), height=34, command=self.run_card_copy_simulation
+        )
+        self.btn_card_copy_sim.pack(fill=tk.X, pady=(0, 4))
+
+        self.btn_card_copy_cancel = RoundedButton(
+            f_actions, hover_bg="#a83232", hover_fg="#ffffff",
+            text="Interromper Cópia", bg="#6e2222", fg="#ffffff",
+            font=("Segoe UI", 9, "bold"), height=30, command=self.cancel_card_copy
+        )
+        self.btn_card_copy_cancel.pack(fill=tk.X)
+        self.btn_card_copy_cancel.pack_forget()
+
+        # --- PAINEL DIREITO: STATUS E TERMINAL ---
+        top_status_frame = tk.Frame(right_panel, bg=COLOR_BG_CARD)
+        top_status_frame.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(10, 5))
+
+        self.progress_card = ttk.Progressbar(top_status_frame, orient="horizontal", mode="determinate")
+        self.progress_card.pack(fill=tk.X, pady=(0, 4))
+
+        self.lbl_card_status = ttk.Label(top_status_frame, text="Aguardando seleção de origem e destino...", font=("Segoe UI", 9))
+        self.lbl_card_status.pack(anchor="w")
+
+        # Terminal de logs
+        self.card_terminal = tk.Text(right_panel, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, insertbackground=COLOR_TEXT_PRIMARY, font=("Consolas", 9), bd=0)
+        self.card_terminal.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        self.card_terminal.tag_config("green", foreground=COLOR_ACCENT)
+        self.card_terminal.tag_config("red", foreground=COLOR_DANGER)
+        self.card_terminal.tag_config("warning", foreground=COLOR_WARNING)
+        self.card_terminal.tag_config("cyan", foreground="#00e1ff")
+        self.card_terminal.tag_config("normal", foreground=COLOR_TEXT_PRIMARY)
+        self.card_terminal.tag_config("muted", foreground=COLOR_TEXT_MUTED)
+
+        # Rodapé do Terminal
+        bottom_term_frame = tk.Frame(right_panel, bg=COLOR_BG_CARD)
+        bottom_term_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(5, 10))
+
+        btn_clear_card = HoverButton(
+            bottom_term_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Limpar Terminal", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, bd=1, relief="solid",
+            font=("Segoe UI", 8), command=self.clear_card_log
+        )
+        btn_clear_card.pack(side=tk.LEFT)
+
+        btn_open_dst = HoverButton(
+            bottom_term_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Abrir Pasta de Destino no Explorer", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
+            font=("Segoe UI", 8, "bold"), command=self.open_card_dst_folder
+        )
+        btn_open_dst.pack(side=tk.RIGHT)
+
+    def browse_card_src(self):
+        init_dir = self.var_card_src.get() if (self.var_card_src.get() and os.path.exists(self.var_card_src.get())) else "K:\\" if os.path.exists("K:\\") else os.getcwd()
+        dir_selected = filedialog.askdirectory(initialdir=init_dir, title="Selecione a Pasta Mãe no Cartão / Drive (ex: FOLDER01 ou DCIM)")
+        if dir_selected:
+            self.var_card_src.set(os.path.normpath(dir_selected))
+
+    def browse_card_dst(self):
+        init_dir = self.var_card_dst.get() if (self.var_card_dst.get() and os.path.exists(self.var_card_dst.get())) else os.getcwd()
+        dir_selected = filedialog.askdirectory(initialdir=init_dir, title="Selecione a Pasta de Destino para os Arquivos")
+        if dir_selected:
+            self.var_card_dst.set(os.path.normpath(dir_selected))
+
+    def use_project_dest_for_card(self):
+        proj_root = getattr(self, "var_creator_root", None)
+        if proj_root and proj_root.get() and os.path.exists(proj_root.get()):
+            self.var_card_dst.set(proj_root.get())
+        else:
+            messagebox.showinfo("Informação", "Nenhum diretório raiz de projetos configurado na aba 'Criar Estrutura de Projeto'.", parent=self)
+
+    def clear_card_log(self):
+        self.card_terminal.delete("1.0", tk.END)
+        self.progress_card['value'] = 0
+        self.lbl_card_status.config(text="Pronto.")
+
+    def open_card_dst_folder(self):
+        dst = self.var_card_dst.get().strip()
+        if dst and os.path.exists(dst):
+            try:
+                if sys.platform == "win32":
+                    os.startfile(dst)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", dst])
+                else:
+                    subprocess.Popen(["xdg-open", dst])
+            except Exception as e:
+                messagebox.showerror("Erro", f"Não foi possível abrir a pasta: {e}", parent=self)
+        else:
+            messagebox.showwarning("Aviso", "A pasta de destino informada não existe ou não foi selecionada.", parent=self)
+
+    def cancel_card_copy(self):
+        if self.card_copy_running:
+            self.card_copy_cancel = True
+            self.log_queue.put(("[AVISO] Solicitando cancelamento da cópia...", "warning", "card_copy"))
+
+    def _prepare_card_copy_ui(self):
+        self.btn_card_copy_run.config(state=tk.DISABLED)
+        self.btn_card_copy_sim.config(state=tk.DISABLED)
+        self.btn_card_copy_cancel.pack(fill=tk.X)
+
+    def _reset_card_copy_ui(self):
+        self.btn_card_copy_run.config(state=tk.NORMAL)
+        self.btn_card_copy_sim.config(state=tk.NORMAL)
+        self.btn_card_copy_cancel.pack_forget()
+
+    def _update_card_progress(self, percent, status_text):
+        try:
+            self.progress_card['value'] = percent
+            self.lbl_card_status.config(text=status_text)
+        except Exception:
+            pass
+
+    def log_card_copy(self, msg, tag="normal"):
+        self.card_terminal.insert(tk.END, msg + "\n", tag)
+        self.card_terminal.see(tk.END)
+
+    def prompt_conflict_resolution(self, filename, subfolder, src_path, dst_path):
+        """Dispara diálogo modal thread-safe para resolução de conflitos de arquivo"""
+        res_queue = queue.Queue()
+        def _show():
+            try:
+                dlg = ConflictDialog(self, filename, subfolder, src_path, dst_path)
+                self.wait_window(dlg)
+                res_queue.put((dlg.action, dlg.apply_to_all))
+            except Exception:
+                res_queue.put(("suffix", False))
+
+        self.after(0, _show)
+        action, apply_all = res_queue.get()
+        return action, apply_all
+
+    def run_card_copy_simulation(self):
+        src = self.var_card_src.get().strip()
+        dst = self.var_card_dst.get().strip()
+
+        if not src or not dst:
+            messagebox.showerror("Campos Obrigatórios", "Por favor, selecione a pasta mãe de Origem e a pasta de Destino.", parent=self)
+            return
+
+        if not os.path.exists(src):
+            messagebox.showerror("Origem Inexistente", "A pasta mãe de Origem selecionada não existe.", parent=self)
+            return
+
+        if os.path.normpath(src).lower() == os.path.normpath(dst).lower():
+            messagebox.showerror("Erro de Loops", "Origem e destino não podem ser a mesma pasta física.", parent=self)
+            return
+
+        self._prepare_card_copy_ui()
+        threading.Thread(target=self._card_copy_worker, args=(src, dst, True), daemon=True).start()
+
+    def run_card_copy_real(self):
+        src = self.var_card_src.get().strip()
+        dst = self.var_card_dst.get().strip()
+
+        if not src or not dst:
+            messagebox.showerror("Campos Obrigatórios", "Por favor, selecione a pasta mãe de Origem e a pasta de Destino.", parent=self)
+            return
+
+        if not os.path.exists(src):
+            messagebox.showerror("Origem Inexistente", "A pasta mãe de Origem selecionada não existe.", parent=self)
+            return
+
+        if not os.path.exists(dst):
+            try:
+                os.makedirs(dst, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Erro de Destino", f"Não foi possível criar a pasta de destino: {str(e)}", parent=self)
+                return
+
+        if os.path.normpath(src).lower() == os.path.normpath(dst).lower():
+            messagebox.showerror("Erro de Loops", "Origem e destino não podem ser a mesma pasta física.", parent=self)
+            return
+
+        try:
+            rel = os.path.relpath(dst, src)
+            if not rel.startswith("..") and rel != ".":
+                messagebox.showerror("Erro de Hierarquia", "A pasta de destino não pode estar dentro da pasta de origem para evitar loops.", parent=self)
+                return
+        except Exception:
+            pass
+
+        confirm = messagebox.askyesno(
+            "Confirmar Cópia do Cartão",
+            f"Origem (Cartão): {src}\nDestino: {dst}\n\nConfirma a cópia de todos os arquivos das subpastas diretamente para o destino?",
+            parent=self
+        )
+        if not confirm:
+            return
+
+        self._prepare_card_copy_ui()
+        threading.Thread(target=self._card_copy_worker, args=(src, dst, False), daemon=True).start()
+
+    def _card_copy_worker(self, src_dir, dst_dir, dry_run=True):
+        try:
+            self.card_copy_running = True
+            self.card_copy_cancel = False
+
+            mode_title = "SIMULAÇÃO (DRY-RUN)" if dry_run else "EXECUÇÃO REAL"
+            self.log_queue.put((f"===========================================================", "cyan", "card_copy"))
+            self.log_queue.put((f"Iniciando Cópia do Cartão - Modo: {mode_title}", "cyan", "card_copy"))
+            self.log_queue.put((f"Origem : {src_dir}", "normal", "card_copy"))
+            self.log_queue.put((f"Destino: {dst_dir}", "normal", "card_copy"))
+            self.log_queue.put((f"===========================================================\n", "cyan", "card_copy"))
+
+            # Determinar extensões permitidas
+            selected_exts = set()
+            match_all = self.var_card_ext_all.get()
+            if self.var_card_ext_aud.get():
+                selected_exts.update({".wav", ".mp3", ".aac", ".m4a", ".flac", ".aif", ".aiff", ".ogg", ".wma"})
+            if self.var_card_ext_vid.get():
+                selected_exts.update({".mp4", ".mov", ".mkv", ".avi", ".mxf", ".braw", ".prores"})
+            if self.var_card_ext_img.get():
+                selected_exts.update({".jpg", ".jpeg", ".png", ".raw", ".cr2", ".cr3", ".arw", ".nef", ".dng", ".rw2", ".orf"})
+
+            custom_ext = self.var_card_ext_custom.get().strip()
+            if custom_ext:
+                for ce in custom_ext.split(","):
+                    ce = ce.strip().lower()
+                    if ce:
+                        if not ce.startswith("."):
+                            ce = f".{ce}"
+                        if ce == ".*":
+                            match_all = True
+                        else:
+                            selected_exts.add(ce)
+
+            if not match_all and not selected_exts:
+                self.log_queue.put(("[ERRO] Nenhuma extensão ou tipo de arquivo foi selecionado!", "red", "card_copy"))
+                return
+
+            self.log_queue.put((f"Escanendo estrutura de subpastas a partir da pasta mãe...", "muted", "card_copy"))
+
+            found_files = [] # list of (full_path, subfolder_name, filename, size_bytes)
+            ignored_count = 0
+            SYSTEM_IGNORES = {".ds_store", "thumbs.db", "desktop.ini"}
+
+            for root, dirs, files in os.walk(src_dir):
+                if self.card_copy_cancel:
+                    self.log_queue.put(("[CANCELADO] Operação interrompida pelo usuário.", "warning", "card_copy"))
+                    return
+
+                rel_dir = os.path.relpath(root, src_dir)
+                if rel_dir == ".":
+                    subfolder_name = os.path.basename(src_dir)
+                else:
+                    subfolder_name = os.path.basename(root)
+
+                for f in files:
+                    if f.lower() in SYSTEM_IGNORES or f.startswith("._"):
+                        continue
+
+                    ext = os.path.splitext(f)[1].lower()
+                    if match_all or ext in selected_exts:
+                        full_path = os.path.join(root, f)
+                        try:
+                            sz = os.path.getsize(full_path)
+                            found_files.append((full_path, subfolder_name, f, sz))
+                        except Exception as e:
+                            self.log_queue.put((f"[AVISO LEITURA] Erro ao ler metadados de '{f}': {e}", "warning", "card_copy"))
+                            ignored_count += 1
+                    else:
+                        ignored_count += 1
+
+            if not found_files:
+                self.log_queue.put(("[AVISO] Nenhum arquivo compatível encontrado nas subpastas da origem.", "warning", "card_copy"))
+                return
+
+            total_files = len(found_files)
+            total_bytes = sum(item[3] for item in found_files)
+            self.log_queue.put((f"Varredura concluída:", "normal", "card_copy"))
+            self.log_queue.put((f" • Total de arquivos elegíveis: {total_files}", "normal", "card_copy"))
+            self.log_queue.put((f" • Volume total de dados: {format_size(total_bytes)}", "normal", "card_copy"))
+            if ignored_count > 0:
+                self.log_queue.put((f" • Arquivos ignorados (outras extensões/sistema): {ignored_count}", "muted", "card_copy"))
+            self.log_queue.put("-" * 55, "normal", "card_copy")
+
+            # Verificação de espaço livre em disco
+            if not dry_run:
+                try:
+                    usage = shutil.disk_usage(dst_dir)
+                    free_bytes = usage.free
+                    if free_bytes < total_bytes:
+                        self.log_queue.put((f"[ERRO CRÍTICO] Espaço insuficiente no destino! Livre: {format_size(free_bytes)} | Necessário: {format_size(total_bytes)}", "red", "card_copy"))
+                        return
+                    else:
+                        self.log_queue.put((f"Espaço livre no disco de destino: {format_size(free_bytes)} (Suficiente)", "muted", "card_copy"))
+                except Exception as e:
+                    self.log_queue.put((f"[AVISO] Não foi possível verificar espaço livre no destino: {e}", "warning", "card_copy"))
+
+            always_prefix = self.var_card_always_prefix.get()
+            default_strategy_str = self.var_card_conflict_action.get()
+            
+            strategy_mode = "ask"
+            if "Prefixar" in default_strategy_str:
+                strategy_mode = "prefix"
+            elif "sufixo" in default_strategy_str.lower():
+                strategy_mode = "suffix"
+            elif "Sobrescrever" in default_strategy_str:
+                strategy_mode = "overwrite"
+            elif "Pular" in default_strategy_str:
+                strategy_mode = "skip"
+
+            session_apply_all_action = None
+
+            existing_in_dst = set()
+            try:
+                for f in os.listdir(dst_dir):
+                    existing_in_dst.add(f.lower())
+            except Exception:
+                pass
+
+            planned_names = set()
+            success_count = 0
+            fail_count = 0
+            skipped_count = 0
+            bytes_copied = 0
+
+            start_time = datetime.datetime.now()
+
+            for idx, (src_path, subfolder, orig_filename, f_size) in enumerate(found_files, 1):
+                if self.card_copy_cancel:
+                    self.log_queue.put(("\n[INTERROMPIDO] Cópia cancelada pelo usuário.", "warning", "card_copy"))
+                    break
+
+                if always_prefix:
+                    base_target = f"{subfolder}_{orig_filename}"
+                else:
+                    base_target = orig_filename
+
+                final_name = base_target
+                target_path = os.path.join(dst_dir, final_name)
+
+                is_conflict = (final_name.lower() in existing_in_dst or final_name.lower() in planned_names)
+
+                if is_conflict:
+                    action = strategy_mode
+                    if strategy_mode == "ask":
+                        if session_apply_all_action:
+                            action = session_apply_all_action
+                        else:
+                            if dry_run:
+                                self.log_queue.put((f" [SIMULAÇÃO CONFLITO] '{subfolder}/{orig_filename}' já existe ou colide. Resolução interativa na execução real.", "warning", "card_copy"))
+                                action = "prefix"
+                            else:
+                                action, apply_all = self.prompt_conflict_resolution(orig_filename, subfolder, src_path, target_path)
+                                if apply_all:
+                                    session_apply_all_action = action
+
+                    if action == "skip":
+                        self.log_queue.put((f" [PULADO] '{subfolder}/{orig_filename}' ignorado.", "muted", "card_copy"))
+                        skipped_count += 1
+                        continue
+                    elif action == "overwrite":
+                        final_name = base_target
+                    elif action == "prefix":
+                        final_name = f"{subfolder}_{orig_filename}"
+                        if final_name.lower() in existing_in_dst or final_name.lower() in planned_names:
+                            root_name, ext_part = os.path.splitext(final_name)
+                            c = 1
+                            while f"{root_name}_{c}{ext_part}".lower() in existing_in_dst or f"{root_name}_{c}{ext_part}".lower() in planned_names:
+                                c += 1
+                            final_name = f"{root_name}_{c}{ext_part}"
+                    elif action == "suffix":
+                        root_name, ext_part = os.path.splitext(base_target)
+                        c = 1
+                        while f"{root_name}_{c}{ext_part}".lower() in existing_in_dst or f"{root_name}_{c}{ext_part}".lower() in planned_names:
+                            c += 1
+                        final_name = f"{root_name}_{c}{ext_part}"
+
+                planned_names.add(final_name.lower())
+                final_dst_path = os.path.join(dst_dir, final_name)
+
+                if dry_run:
+                    conflict_tag = " (Renomeado/Resolvido)" if final_name != orig_filename else ""
+                    self.log_queue.put((f" [PRÉVIA {idx}/{total_files}] '{subfolder}/{orig_filename}' ➔ '{final_name}' ({format_size(f_size)}){conflict_tag}", "normal", "card_copy"))
+                    pct = int((idx / total_files) * 100)
+                    self.after(0, lambda p=pct, i=idx, t=total_files: self._update_card_progress(p, f"Simulação: {i}/{t} arquivos analisados..."))
+                else:
+                    try:
+                        pct = int((idx / total_files) * 100)
+                        status_str = f"Copiando {idx}/{total_files} ({format_size(bytes_copied)} / {format_size(total_bytes)}) - {final_name}"
+                        self.after(0, lambda p=pct, s=status_str: self._update_card_progress(p, s))
+
+                        shutil.copy2(src_path, final_dst_path)
+
+                        copied_size = os.path.getsize(final_dst_path)
+                        if copied_size != f_size:
+                            self.log_queue.put((f" [ERRO INTEGRIDADE] Tamanho divergente em '{final_name}'! Original: {f_size}B, Gravado: {copied_size}B", "red", "card_copy"))
+                            fail_count += 1
+                        else:
+                            success_count += 1
+                            bytes_copied += copied_size
+                            rename_info = f" (como '{final_name}')" if final_name != orig_filename else ""
+                            self.log_queue.put((f" [OK {idx}/{total_files}] {subfolder}/{orig_filename}{rename_info} [{format_size(f_size)}]", "green", "card_copy"))
+                            existing_in_dst.add(final_name.lower())
+
+                    except PermissionError:
+                        self.log_queue.put((f" [ERRO PERMISSÃO] Arquivo bloqueado ou protegido contra gravação: '{orig_filename}'", "red", "card_copy"))
+                        fail_count += 1
+                    except OSError as e:
+                        self.log_queue.put((f" [ERRO I/O] Falha de leitura/escrita em '{orig_filename}': {e}", "red", "card_copy"))
+                        fail_count += 1
+                    except Exception as e:
+                        self.log_queue.put((f" [ERRO] Falha ao copiar '{orig_filename}': {e}", "red", "card_copy"))
+                        fail_count += 1
+
+            duration = datetime.datetime.now() - start_time
+            dur_str = f"{int(duration.total_seconds())}s"
+
+            self.log_queue.put("\n===========================================================", "cyan", "card_copy")
+            if dry_run:
+                self.log_queue.put((f"Simulação concluída com sucesso! ({dur_str})", "green", "card_copy"))
+                self.log_queue.put((f"Total de arquivos simulados: {total_files} | Volume: {format_size(total_bytes)}", "normal", "card_copy"))
+                self.log_queue.put((f"Para efetivar a cópia física no disco, clique em 'Iniciar Cópia do Cartão'.", "warning", "card_copy"))
+                self.after(0, lambda: self._update_card_progress(100, f"Simulação concluída: {total_files} arquivos prontos."))
+            else:
+                self.log_queue.put((f"Processo de Cópia Finalizado em {dur_str}!", "green" if fail_count == 0 else "warning", "card_copy"))
+                self.log_queue.put((f"Sucesso: {success_count} arquivo(s) copiado(s) ({format_size(bytes_copied)})", "green", "card_copy"))
+                if skipped_count > 0:
+                    self.log_queue.put((f"Pulsados: {skipped_count} arquivo(s)", "muted", "card_copy"))
+                if fail_count > 0:
+                    self.log_queue.put((f"Falhas: {fail_count} arquivo(s)", "red", "card_copy"))
+                self.after(0, lambda: self._update_card_progress(100, f"Concluído! {success_count} copiados, {fail_count} falhas."))
+            self.log_queue.put("===========================================================", "cyan", "card_copy")
+
+        except Exception as e:
+            self.log_queue.put((f"[FALHA GERAL] {str(e)}", "red", "card_copy"))
+        finally:
+            self.card_copy_running = False
+            self.after(0, self._reset_card_copy_ui)
+
+    # =========================================================================
     # AUXILIAR: CHECK LOOP DE CONTROLE DE THREADS (Thread-Safe GUI)
     # =========================================================================
     def check_queue_loop(self):
@@ -2032,6 +2647,8 @@ class App(tk.Tk):
                     self.log_bkp(msg, tag)
                 elif target == "renamer":
                     self.log_renamer(msg, tag)
+                elif target == "card_copy":
+                    self.log_card_copy(msg, tag)
                 else:
                     self.log_clean(msg, tag)
             else:
@@ -2043,6 +2660,8 @@ class App(tk.Tk):
                     self.log_bkp(msg, tag)
                 elif active_tab == 3: # Renomeador
                     self.log_renamer(msg, tag)
+                elif active_tab == 4: # Copia do Cartão
+                    self.log_card_copy(msg, tag)
                 else:
                     self.log_clean(msg, tag)
                 
@@ -2224,6 +2843,119 @@ class App(tk.Tk):
             messagebox.showinfo("Colado", f"{added_count} subpastas coladas com sucesso!", parent=self)
         else:
             messagebox.showinfo("Aviso", "Nenhuma pasta nova adicionada (todas já existem no modelo).", parent=self)
+
+class ConflictDialog(tk.Toplevel):
+    def __init__(self, parent, filename, subfolder, src_path, dst_path):
+        super().__init__(parent)
+        self.parent = parent
+        self.filename = filename
+        self.subfolder = subfolder
+        self.src_path = src_path
+        self.dst_path = dst_path
+
+        self.action = "suffix"  # "prefix", "suffix", "overwrite", "skip"
+        self.apply_to_all = False
+
+        self.title("Conflito de Arquivo Detectado")
+        self.geometry("540x420")
+        self.minsize(500, 380)
+        self.resizable(False, False)
+        self.configure(bg=COLOR_BG_DARK)
+
+        # Centraliza modal
+        self.update_idletasks()
+        w, h = 540, 420
+        x = parent.winfo_x() + (parent.winfo_width() - w) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+        round_window_corners(self)
+        self.transient(parent)
+        self.grab_set()
+
+        # UI Header
+        header = tk.Frame(self, bg=COLOR_BG_CARD, padx=15, pady=10)
+        header.pack(fill=tk.X)
+        tk.Label(header, text="⚠️ Conflito de Nome de Arquivo", bg=COLOR_BG_CARD, fg=COLOR_WARNING, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(header, text=f"O arquivo '{filename}' já existe no destino com o mesmo nome.", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+
+        # Detalhes
+        card = tk.Frame(self, bg=COLOR_BG_INPUT, padx=12, pady=10, highlightbackground=COLOR_BORDER, highlightthickness=1)
+        card.pack(fill=tk.X, padx=15, pady=(10, 5))
+
+        src_info = "N/A"
+        dst_info = "N/A"
+        try:
+            if os.path.exists(src_path):
+                s_sz = format_size(os.path.getsize(src_path))
+                s_dt = datetime.datetime.fromtimestamp(os.path.getmtime(src_path)).strftime("%d/%m/%Y %H:%M")
+                src_info = f"{s_sz} | Modificado: {s_dt}"
+        except Exception:
+            pass
+
+        try:
+            if os.path.exists(dst_path):
+                d_sz = format_size(os.path.getsize(dst_path))
+                d_dt = datetime.datetime.fromtimestamp(os.path.getmtime(dst_path)).strftime("%d/%m/%Y %H:%M")
+                dst_info = f"{d_sz} | Modificado: {d_dt}"
+        except Exception:
+            pass
+
+        tk.Label(card, text=f"Pasta de Origem no Cartão: {subfolder}", bg=COLOR_BG_INPUT, fg=COLOR_ACCENT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(card, text=f"• Arquivo Novo: {src_info}", bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+        tk.Label(card, text=f"• Arquivo Já Existente: {dst_info}", bg=COLOR_BG_INPUT, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(1, 0))
+
+        # Checkbox "Aplicar para todos os próximos conflitos"
+        self.var_apply_all = tk.BooleanVar(value=False)
+        cb_all = tk.Checkbutton(self, text="Aplicar esta escolha para todos os próximos conflitos desta cópia",
+                                variable=self.var_apply_all, bg=COLOR_BG_DARK, fg=COLOR_TEXT_PRIMARY,
+                                selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_DARK,
+                                font=("Segoe UI", 9))
+        cb_all.pack(anchor="w", padx=15, pady=(8, 6))
+
+        # Botões de Ação
+        btn_frame = tk.Frame(self, bg=COLOR_BG_DARK)
+        btn_frame.pack(fill=tk.X, padx=15, pady=4)
+
+        # 1. Prefixar pasta filha
+        btn_prefix = RoundedButton(
+            btn_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text=f"Prefixar Nome da Subpasta ({subfolder}_{filename})", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            height=32, command=lambda: self._select_action("prefix")
+        )
+        btn_prefix.pack(fill=tk.X, pady=3)
+
+        # 2. Adicionar sufixo
+        btn_suffix = RoundedButton(
+            btn_frame, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            text="Adicionar Sufixo Numérico (ex: arquivo_1.ext)", bg=COLOR_ACCENT, fg="#ffffff",
+            height=32, command=lambda: self._select_action("suffix")
+        )
+        btn_suffix.pack(fill=tk.X, pady=3)
+
+        # 3. Sobrescrever
+        btn_overwrite = RoundedButton(
+            btn_frame, hover_bg="#c94a38", hover_fg="#ffffff",
+            text="Sobrescrever Arquivo no Destino", bg="#992b1d", fg="#ffffff",
+            height=32, command=lambda: self._select_action("overwrite")
+        )
+        btn_overwrite.pack(fill=tk.X, pady=3)
+
+        # 4. Pular
+        btn_skip = RoundedButton(
+            btn_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Pular Arquivo (Não Copiar)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            height=32, command=lambda: self._select_action("skip")
+        )
+        btn_skip.pack(fill=tk.X, pady=3)
+
+        self.protocol("WM_DELETE_WINDOW", lambda: self._select_action("suffix"))
+
+    def _select_action(self, action):
+        self.action = action
+        self.apply_to_all = self.var_apply_all.get()
+        self.grab_release()
+        self.destroy()
 
 class AddFolderDialog(tk.Toplevel):
     def __init__(self, parent, existing_folders):

@@ -24,30 +24,49 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Verify Python & Tkinter
+        run: |
+          python3 --version
+          if ! python3 -c "import tkinter" 2>/dev/null; then
+            echo "Tkinter não encontrado no setup-python, instalando python-tk..."
+            brew install python-tk@3.11 || true
+          fi
+          python3 -c "import tkinter; print('Tkinter validado com sucesso! Versao:', tkinter.TkVersion)"
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyinstaller
 
       - name: Run build script
         run: |
           chmod +x build.sh
           ./build.sh
 
-      - name: Package macOS App Bundle
+      - name: Package macOS App Bundle & Binaries
         run: |
           cd dist
-          if [ -d "Silent_Guardian.app" ]; then
-            zip -r Silent_Guardian_macOS_app.zip Silent_Guardian.app
-          elif [ -f "Silent_Guardian" ]; then
-            zip Silent_Guardian_macOS_binary.zip Silent_Guardian
-          else
-            echo "Nenhum arquivo ou pacote de build encontrado em dist/"
-            exit 1
+          # Empacota MPFolders.app com preservação de symlinks (-y)
+          if [ -d "MPFolders.app" ]; then
+            zip -r -y MPFolders_macOS_app.zip MPFolders.app
           fi
+          if [ -d "Silent_Guardian.app" ]; then
+            zip -r -y Silent_Guardian_macOS_app.zip Silent_Guardian.app
+          fi
+          # Empacota binários standalone caso gerados
+          if [ -f "MPFolders" ]; then
+            zip -y MPFolders_macOS_binary.zip MPFolders
+          fi
+          if [ -f "Silent_Guardian" ]; then
+            zip -y Silent_Guardian_macOS_binary.zip Silent_Guardian
+          fi
+
+          echo "Arquivos empacotados em dist/:"
+          ls -lh *.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macOS-Build
+          name: MPFolders-macOS-Build
           path: dist/*.zip
+          if-no-files-found: error

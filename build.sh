@@ -42,14 +42,12 @@ PYINSTALLER_ARGS=(
     "--onefile"
     "--windowed"
     "--name=$PROJECT_NAME"
+    "--collect-all=tkinter"
 )
 
 if [ "$HAS_ICON" = true ]; then
     PYINSTALLER_ARGS+=("--icon=$ICON_FILE")
     # Adiciona o ícone dentro do executável para ser acessível via sys._MEIPASS
-    PYINSTALLER_ARGS+=("--add-data=$ICON_FILE:.") # No Linux/Bash usa dois pontos (:) como separador de path ou ponto-e-vírgula (;) no Windows, mas como é bash no windows (Git bash), pyinstaller converte. O ideal cross-platform é detectar o OS, mas o pyinstaller prefere ; no windows e : no linux. Vamos usar o padrão baseado no OS hospedeiro: se for MSYS/Cygwin (Git Bash), ainda é Windows. 
-    # Para garantir compatibilidade com PyInstaller rodando no Python de Windows via Git Bash, usamos o separador da plataforma:
-    
     if [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]]; then
         # Git bash no Windows
         PYINSTALLER_ARGS+=("--add-data=$ICON_FILE;.")
@@ -59,31 +57,71 @@ if [ "$HAS_ICON" = true ]; then
     fi
 fi
 
-# Chama o PyInstaller
-python -m PyInstaller "${PYINSTALLER_ARGS[@]}" "$SOURCE_FILE"
-
-# 4. Retornar executável para o Dropbox
-echo -e "\e[36mMovendo executável gerado de volta para o workspace...\e[0m"
-cd "$WORKSPACE_DIR" || exit 1
-
-# O executável no Windows terá extensão .exe, no Linux não terá extensão.
-if [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" ]; then
-    EXE_FILE="${PROJECT_NAME}.exe"
-elif [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" ]; then
-    EXE_FILE="${PROJECT_NAME}"
+# Determina comando python/python3
+if command -v python3 &>/dev/null; then
+    PY_CMD="python3"
 else
-    EXE_FILE=""
+    PY_CMD="python"
 fi
 
-if [ -n "$EXE_FILE" ]; then
-    mkdir -p "$WORKSPACE_DIR/dist"
-    cp -f "$TEMP_BUILD_DIR/dist/$EXE_FILE" "$WORKSPACE_DIR/dist/"
-    echo -e "\e[32mSucesso! Executável gerado: $WORKSPACE_DIR/dist/$EXE_FILE\e[0m"
-else
-    echo -e "\e[31mERRO: O executável não foi encontrado. Falha no PyInstaller.\e[0m"
+# Chama o PyInstaller
+$PY_CMD -m PyInstaller "${PYINSTALLER_ARGS[@]}" "$SOURCE_FILE"
+PYI_EXIT=$?
+
+if [ $PYI_EXIT -ne 0 ]; then
+    echo -e "\e[31mERRO: Falha durante a execução do PyInstaller (Código: $PYI_EXIT)\e[0m"
+    cd "$WORKSPACE_DIR" || exit 1
+    rm -rf "$TEMP_BUILD_DIR"
+    exit $PYI_EXIT
+fi
+
+# 4. Retornar executável e pacotes gerados para o workspace
+echo -e "\e[36mMovendo executável/app gerado de volta para o workspace...\e[0m"
+cd "$WORKSPACE_DIR" || exit 1
+mkdir -p "$WORKSPACE_DIR/dist"
+
+FOUND_ANY=false
+
+# 4.1. macOS App Bundle (.app)
+if [ -d "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" ]; then
+    echo "App Bundle (.app) detectado. Copiando..."
+    cp -R "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" "$WORKSPACE_DIR/dist/"
+    cp -R "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" "$WORKSPACE_DIR/dist/MPFolders.app"
+    
+    # Assinatura ad-hoc no macOS para evitar bloqueio do Gatekeeper
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "Aplicando assinatura ad-hoc codesign no macOS..."
+        codesign --force --deep --sign - "$WORKSPACE_DIR/dist/${PROJECT_NAME}.app" 2>/dev/null || true
+        codesign --force --deep --sign - "$WORKSPACE_DIR/dist/MPFolders.app" 2>/dev/null || true
+    fi
+    echo -e "\e[32mSucesso! App Bundle gerado: $WORKSPACE_DIR/dist/MPFolders.app e ${PROJECT_NAME}.app\e[0m"
+    FOUND_ANY=true
+fi
+
+# 4.2. Windows Executável (.exe)
+if [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" ]; then
+    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" "$WORKSPACE_DIR/dist/"
+    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" "$WORKSPACE_DIR/dist/MPFolders.exe"
+    echo -e "\e[32mSucesso! Executável gerado: $WORKSPACE_DIR/dist/MPFolders.exe e ${PROJECT_NAME}.exe\e[0m"
+    FOUND_ANY=true
+fi
+
+# 4.3. Binário Standalone Unix/Linux/macOS
+if [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" ]; then
+    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/"
+    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/MPFolders"
+    chmod +x "$WORKSPACE_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/MPFolders"
+    echo -e "\e[32mSucesso! Binário gerado: $WORKSPACE_DIR/dist/MPFolders e ${PROJECT_NAME}\e[0m"
+    FOUND_ANY=true
+fi
+
+if [ "$FOUND_ANY" = false ]; then
+    echo -e "\e[31mERRO: Nenhum executável ou pacote .app foi encontrado em $TEMP_BUILD_DIR/dist. Falha no PyInstaller.\e[0m"
+    rm -rf "$TEMP_BUILD_DIR"
+    exit 1
 fi
 
 # 5. Limpeza
 echo "Limpando diretório temporário..."
 rm -rf "$TEMP_BUILD_DIR"
-echo -e "\e[36mBuild finalizado.\e[0m"
+echo -e "\e[36mBuild finalizado com sucesso.\e[0m"

@@ -2,13 +2,29 @@
 # MPFolders (Silent Guardian) - .gitignore
 # ============================================================
 
-# Arquivos de Tasks Internas / Documentação Local
-/IARef/
+# Arquivos de Tasks Internas / Documentação Local / IA
+IARef/
+iaref/
+[iI][aA][rR][eE][fF]/
+**/IARef/**
+**/iaref/**
 Tasks.md
 Tasks*.md
+Tasks.MD
 BRAIN.md
 Brain.md
+*.brain.md
+scratch/
 /scratch/
+.agents/
+.gemini/
+.system_generated/
+
+# IDEs e Editores
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
 
 # Python (Byte-compiled / Cache)
 __pycache__/
@@ -20,7 +36,7 @@ __pycache__/
 env/
 venv/
 
-# PyInstaller & Compilações
+# PyInstaller & Compilações Locais
 *.spec
 build/
 dist/
@@ -34,11 +50,13 @@ Desktop.ini
 *.tmp
 *~
 
-# App configuration (contains local paths and templates)
+# App configuration (dados locais, templates e geometria)
 config_gerenciador.json
+config_gerenciador*.json
 *.log
 .env
 .env.*
 
 # Conflitos de Sincronização do Dropbox
 *conflicted copy*
+*conflito*
