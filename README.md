@@ -60,7 +60,7 @@ O projeto inclui scripts automatizados de build direcionados à pasta temporári
 ## 🚀 Integração Contínua (GitHub Actions)
 
 O repositório inclui suporte pronto para compilação na nuvem:
-- 💻 **Build macOS**: O arquivo `.github/workflows/build-mac.yml` roda em agentes `macos-latest` para gerar e assinar automaticamente o aplicativo empacotado `Silent_Guardian.app` (ZIP) via PyInstaller a cada nova modificação na branch principal (`main`/`master`).
+- 💻 **Build macOS**: O arquivo `.github/workflows/build-mac.yml` roda em agentes `macos-latest` para gerar e assinar automaticamente o aplicativo empacotado `MPFolders.app` (ZIP) via PyInstaller a cada nova modificação na branch principal (`main`/`master`).
 
 ---
 

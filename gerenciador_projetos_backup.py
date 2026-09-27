@@ -15,6 +15,8 @@ import ctypes
 
 def round_window_corners(window):
     """Aplica cantos arredondados nativos no Windows 11 usando a DWM API"""
+    if sys.platform != "win32":
+        return
     try:
         window.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
@@ -341,6 +343,70 @@ class CalendarDialog(tk.Toplevel):
 
 
 # ==========================================
+# WIDGET: PAINEL COM SCROLLBAR VERTICAL
+# ==========================================
+class ScrollablePanel(tk.Frame):
+    """
+    Painel conteiner com barra de rolagem vertical para permitir navegação
+    fluida em telas com resoluções menores ou altas escalas de DPI.
+    """
+    def __init__(self, parent, bg=COLOR_BG_DARK, *args, **kwargs):
+        super().__init__(parent, bg=bg, *args, **kwargs)
+        self.bg = bg
+
+        self.canvas = tk.Canvas(self, bg=bg, bd=0, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, style="Vertical.TScrollbar")
+        self.content = tk.Frame(self.canvas, bg=bg)
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Suporte universal à rolagem do mouse quando o ponteiro estiver sobre o painel ou qualquer widget filho
+        self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_mousewheel, add="+")
+
+    def _on_content_configure(self, event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        # Sincroniza a largura do frame interno com a largura visível do canvas
+        self.canvas.itemconfig(self.canvas_window, width=event.width)
+
+    def _is_descendant(self, widget):
+        if widget is None:
+            return False
+        return widget == self or (isinstance(widget, tk.Misc) and str(widget).startswith(str(self) + "."))
+
+    def _on_mousewheel(self, event):
+        try:
+            if not self.winfo_ismapped():
+                return
+            widget = self.winfo_containing(event.x_root, event.y_root)
+            if widget and self._is_descendant(widget):
+                if event.num == 4:
+                    self.canvas.yview_scroll(-2, "units")
+                elif event.num == 5:
+                    self.canvas.yview_scroll(2, "units")
+                elif event.delta:
+                    # Windows (delta ~120) / macOS (delta ~1)
+                    if abs(event.delta) >= 120:
+                        step = -1 * int(event.delta / 120)
+                    else:
+                        step = -1 if event.delta > 0 else 1
+                    self.canvas.yview_scroll(step, "units")
+        except Exception:
+            pass
+
+
+# ==========================================
 # APLICATIVO PRINCIPAL (APP FRAMEWORK)
 # ==========================================
 class App(tk.Tk):
@@ -348,11 +414,12 @@ class App(tk.Tk):
         super().__init__()
         
         # Evitar sobreposição de ícone pelo Python na barra de tarefas (Windows)
-        try:
-            myappid = 'silentguardian.workflowbackup.app.1'
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except Exception:
-            pass
+        if sys.platform == "win32":
+            try:
+                myappid = 'mpfolders.workflowbackup.app.1'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
 
         # Define caminho do arquivo de configurações local (portabilidade em .exe)
         if getattr(sys, 'frozen', False):
@@ -444,6 +511,16 @@ class App(tk.Tk):
         style.map("TCombobox", 
                   fieldbackground=[("readonly", COLOR_BG_INPUT)],
                   foreground=[("readonly", COLOR_TEXT_PRIMARY)])
+
+        # Barra de Rolagem Vertical (Dark)
+        style.configure("Vertical.TScrollbar",
+                        background=COLOR_BG_CARD,
+                        troughcolor=COLOR_BG_DARK,
+                        bordercolor=COLOR_BG_DARK,
+                        arrowcolor=COLOR_TEXT_MUTED)
+        style.map("Vertical.TScrollbar",
+                  background=[("active", COLOR_ACCENT), ("pressed", COLOR_ACCENT_HOVER)],
+                  arrowcolor=[("active", COLOR_ACCENT)])
 
     def build_ui(self):
         # Header Superior do App
@@ -634,14 +711,14 @@ class App(tk.Tk):
         self.paned_creator = tk.PanedWindow(self.tab_creator, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
         self.paned_creator.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(self.paned_creator, bg=COLOR_BG_DARK, width=410)
+        left_panel = ScrollablePanel(self.paned_creator, bg=COLOR_BG_DARK, width=410)
         right_panel = ttk.LabelFrame(self.paned_creator, text=" Árvore Estrutural do Projeto ")
         
         self.paned_creator.add(left_panel, minsize=380)
         self.paned_creator.add(right_panel, minsize=420)
 
         # --- PAINEL DE ENTRADAS ---
-        lf_inputs = ttk.LabelFrame(left_panel, text=" Detalhes do Novo Projeto ")
+        lf_inputs = ttk.LabelFrame(left_panel.content, text=" Detalhes do Novo Projeto ")
         lf_inputs.pack(side=tk.TOP, fill=tk.X, expand=False, padx=15, pady=(15, 10), ipady=8, ipadx=8)
 
         # Destino Raiz
@@ -696,22 +773,22 @@ class App(tk.Tk):
         lf_inputs.columnconfigure(0, weight=1)
         lf_inputs.columnconfigure(1, weight=1)
 
-        # Botão de Execução (empacotado primeiro no BOTTOM para garantir que nunca seja ocultado no redimensionamento)
+        # Preview do caminho de montagem final
+        lf_preview = ttk.LabelFrame(left_panel.content, text=" Caminho de Destino Estimado ")
+        lf_preview.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(0, 10))
+        
+        self.lbl_path_preview = tk.Text(lf_preview, height=4, bg=COLOR_BG_INPUT, fg=COLOR_WARNING, bd=0, wrap=tk.WORD, font=("Consolas", 9))
+        self.lbl_path_preview.pack(fill=tk.X, padx=8, pady=8)
+        self.lbl_path_preview.insert(tk.END, "Preencha os dados acima para visualizar o caminho...")
+        self.lbl_path_preview.config(state=tk.DISABLED)
+
+        # Botão de Execução
         btn_run_creator = RoundedButton(
-            left_panel, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            left_panel.content, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
             text="Criar Estrutura de Pastas", bg=COLOR_ACCENT, fg="#ffffff",
             font=("Segoe UI", 10, "bold"), height=42, command=self.execute_create_project
         )
-        btn_run_creator.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(10, 15))
-
-        # Preview do caminho de montagem final (preenche o espaço restante no centro)
-        lf_preview = ttk.LabelFrame(left_panel, text=" Caminho de Destino Estimado ")
-        lf_preview.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=15, pady=10)
-        
-        self.lbl_path_preview = tk.Text(lf_preview, height=4, bg=COLOR_BG_INPUT, fg=COLOR_WARNING, bd=0, wrap=tk.WORD, font=("Consolas", 9))
-        self.lbl_path_preview.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.lbl_path_preview.insert(tk.END, "Preencha os dados acima para visualizar o caminho...")
-        self.lbl_path_preview.config(state=tk.DISABLED)
+        btn_run_creator.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(5, 15))
 
         # Ligar listeners para atualizar o preview dinamicamente
         for var in (self.var_creator_root, self.var_day, self.var_month, self.var_year, self.var_client, self.var_project_name):
@@ -1165,14 +1242,14 @@ class App(tk.Tk):
         self.paned_cleaner = tk.PanedWindow(self.tab_cleaner, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
         self.paned_cleaner.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(self.paned_cleaner, bg=COLOR_BG_DARK, width=370)
+        left_panel = ScrollablePanel(self.paned_cleaner, bg=COLOR_BG_DARK, width=370)
         right_panel = ttk.LabelFrame(self.paned_cleaner, text=" Terminal de Limpeza & Relatório ")
         
         self.paned_cleaner.add(left_panel, minsize=350)
         self.paned_cleaner.add(right_panel, minsize=400)
 
         # --- Opções de Configuração ---
-        lf_clean_opts = ttk.LabelFrame(left_panel, text=" Configurações de Limpeza ")
+        lf_clean_opts = ttk.LabelFrame(left_panel.content, text=" Configurações de Limpeza ")
         lf_clean_opts.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(15, 10))
 
         ttk.Label(lf_clean_opts, text="Diretório de Análise:").pack(anchor="w", padx=8, pady=(8, 2))
@@ -1210,34 +1287,34 @@ class App(tk.Tk):
         )
         cb_bypass.pack(anchor="w", padx=8, pady=6)
 
-        # Botões de Ação (empacotados primeiro no BOTTOM para segurança no redimensionamento)
-        btn_run_clean = RoundedButton(
-            left_panel, hover_bg="#d93847", hover_fg="#ffffff",
-            text="EXECUTAR LIMPEZA AGORA", bg=COLOR_DANGER, fg="#ffffff",
-            font=("Segoe UI", 9, "bold"), height=40, command=self.run_clean_real
-        )
-        btn_run_clean.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(2, 15))
-
-        btn_simulate_clean = RoundedButton(
-            left_panel, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
-            text="Simular Limpeza (Seguro)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
-            font=("Segoe UI", 9, "bold"), height=40, command=self.run_clean_simulation
-        )
-        btn_simulate_clean.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=2)
-
-        # Nota de Segurança (preenche espaço restante)
-        note_frame = tk.Frame(left_panel, bg=COLOR_BG_CARD, bd=1, relief="solid", highlightthickness=0)
-        note_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=15, pady=10)
+        # Nota de Segurança
+        note_frame = tk.Frame(left_panel.content, bg=COLOR_BG_CARD, bd=1, relief="solid", highlightthickness=0)
+        note_frame.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(0, 10))
         
         lbl_note_title = ttk.Label(note_frame, text="SEGURANÇA EM PRIMEIRO LUGAR", font=("Segoe UI", 9, "bold"), foreground=COLOR_WARNING)
         lbl_note_title.pack(anchor="w", padx=8, pady=(8, 2))
         
-        lbl_note_desc = tk.Text(note_frame, wrap=tk.WORD, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, bd=0, font=("Segoe UI", 9), height=5)
-        lbl_note_desc.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        lbl_note_desc = tk.Text(note_frame, wrap=tk.WORD, bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, bd=0, font=("Segoe UI", 9), height=7)
+        lbl_note_desc.pack(fill=tk.X, padx=8, pady=(0, 8))
         lbl_note_desc.insert(tk.END, "Esta ferramenta nunca apaga arquivos de dados sem sua instrução.\n\n"
                                      "1. Use 'Simular Limpeza' para fazer um Dry-Run. O terminal listará tudo o que será deletado, sem alterar o disco.\n\n"
                                      "2. Modo Bypass: Permite rodar a limpeza recursiva em drives principais de armazenamento ou diretórios internos sensíveis do OS.")
         lbl_note_desc.config(state=tk.DISABLED)
+
+        # Botões de Ação
+        btn_simulate_clean = RoundedButton(
+            left_panel.content, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Simular Limpeza (Seguro)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 9, "bold"), height=40, command=self.run_clean_simulation
+        )
+        btn_simulate_clean.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(5, 4))
+
+        btn_run_clean = RoundedButton(
+            left_panel.content, hover_bg="#d93847", hover_fg="#ffffff",
+            text="EXECUTAR LIMPEZA AGORA", bg=COLOR_DANGER, fg="#ffffff",
+            font=("Segoe UI", 9, "bold"), height=40, command=self.run_clean_real
+        )
+        btn_run_clean.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(4, 15))
 
         # --- Terminal de Saída de Log ---
         self.clean_terminal = tk.Text(right_panel, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, insertbackground=COLOR_TEXT_PRIMARY, font=("Consolas", 9))
@@ -1401,15 +1478,15 @@ class App(tk.Tk):
         self.paned_backup = tk.PanedWindow(self.tab_backup, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
         self.paned_backup.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(self.paned_backup, bg=COLOR_BG_DARK, width=380)
+        left_panel = ScrollablePanel(self.paned_backup, bg=COLOR_BG_DARK, width=380)
         right_panel = ttk.LabelFrame(self.paned_backup, text=" Status do Backup Incremental ")
         
         self.paned_backup.add(left_panel, minsize=350)
         self.paned_backup.add(right_panel, minsize=400)
 
         # --- Painel de Configurações ---
-        lf_paths = ttk.LabelFrame(left_panel, text=" Seleção de Mídias ")
-        lf_paths.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+        lf_paths = ttk.LabelFrame(left_panel.content, text=" Seleção de Mídias ")
+        lf_paths.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(15, 8))
 
         # Origem
         ttk.Label(lf_paths, text="Diretório de Origem (Backup de):").pack(anchor="w", padx=8, pady=(8, 2))
@@ -1438,8 +1515,8 @@ class App(tk.Tk):
         btn_browse_dst.pack(anchor="e", padx=8, pady=4)
 
         # Parâmetros Avançados de Robocopy
-        lf_advanced = ttk.LabelFrame(left_panel, text=" Modos de Cópia Incremental ")
-        lf_advanced.pack(side=tk.TOP, fill=tk.X, padx=15, pady=10)
+        lf_advanced = ttk.LabelFrame(left_panel.content, text=" Modos de Cópia Incremental ")
+        lf_advanced.pack(side=tk.TOP, fill=tk.X, padx=15, pady=8)
 
         self.var_bkp_xo = tk.BooleanVar(value=True)
         self.var_bkp_fat = tk.BooleanVar(value=True)
@@ -1457,20 +1534,20 @@ class App(tk.Tk):
                                 bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD, command=self.warn_mirror_mode)
         cb_mir.pack(anchor="w", padx=8, pady=4)
 
-        # Botão de Ação (empacotado primeiro no BOTTOM para segurança no redimensionamento)
+        # Validador de Espaço em Disco
+        self.lf_disk_status = ttk.LabelFrame(left_panel.content, text=" Monitoramento de Espaço ")
+        self.lf_disk_status.pack(side=tk.TOP, fill=tk.X, padx=15, pady=8)
+        
+        self.lbl_space_status = ttk.Label(self.lf_disk_status, text="Aguardando seleção de origem e destino...", wraplength=340, justify="left")
+        self.lbl_space_status.pack(padx=8, pady=8, fill=tk.X)
+
+        # Botão de Ação
         self.btn_run_backup = RoundedButton(
-            left_panel, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            left_panel.content, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
             text="Executar Backup Incremental", bg=COLOR_ACCENT, fg="#ffffff",
             font=("Segoe UI", 10, "bold"), height=42, command=self.start_backup
         )
-        self.btn_run_backup.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(10, 15))
-
-        # Validador de Espaço em Disco (preenche espaço restante)
-        self.lf_disk_status = ttk.LabelFrame(left_panel, text=" Monitoramento de Espaço ")
-        self.lf_disk_status.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=15, pady=10)
-        
-        self.lbl_space_status = ttk.Label(self.lf_disk_status, text="Aguardando seleção de origem e destino...", wraplength=340, justify="left")
-        self.lbl_space_status.pack(padx=8, pady=8, fill=tk.BOTH, expand=True)
+        self.btn_run_backup.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(8, 15))
 
         # Triggers de cálculo de espaço
         self.var_bkp_src.trace_add("write", lambda *args: self.calculate_disk_sizes())
@@ -1720,14 +1797,14 @@ class App(tk.Tk):
         self.paned_renamer = tk.PanedWindow(self.tab_renamer, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
         self.paned_renamer.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(self.paned_renamer, bg=COLOR_BG_DARK, width=390)
+        left_panel = ScrollablePanel(self.paned_renamer, bg=COLOR_BG_DARK, width=390)
         right_panel = ttk.LabelFrame(self.paned_renamer, text=" Terminal / Preview de Renomeação ")
 
         self.paned_renamer.add(left_panel, minsize=370)
         self.paned_renamer.add(right_panel, minsize=400)
 
         # --- SELEÇÃO DE DIRETÓRIO ---
-        lf_dir = ttk.LabelFrame(left_panel, text=" Pasta de Trabalho ")
+        lf_dir = ttk.LabelFrame(left_panel.content, text=" Pasta de Trabalho ")
         lf_dir.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(15, 5))
 
         ttk.Label(lf_dir, text="Diretório dos Arquivos:").pack(anchor="w", padx=8, pady=(6, 2))
@@ -1743,7 +1820,7 @@ class App(tk.Tk):
         btn_browse_dir.pack(anchor="e", padx=8, pady=(2, 6))
 
         # --- FILTRO DE EXTENSÕES / TIPOS DE ARQUIVO ---
-        lf_exts = ttk.LabelFrame(left_panel, text=" Seleção de Tipos / Extensões ")
+        lf_exts = ttk.LabelFrame(left_panel.content, text=" Seleção de Tipos / Extensões ")
         lf_exts.pack(side=tk.TOP, fill=tk.X, padx=15, pady=5)
 
         self.var_ext_img = tk.BooleanVar(value=True)
@@ -1769,7 +1846,7 @@ class App(tk.Tk):
         entry_custom_ext.pack(fill=tk.X, padx=8, pady=(0, 6))
 
         # --- REGRAS DE NOMENCLATURA E INCREMENTO ---
-        lf_rules = ttk.LabelFrame(left_panel, text=" Regras de Nomenclatura e Incremento ")
+        lf_rules = ttk.LabelFrame(left_panel.content, text=" Regras de Nomenclatura e Incremento ")
         lf_rules.pack(side=tk.TOP, fill=tk.X, padx=15, pady=5)
 
         ttk.Label(lf_rules, text="Nomenclatura Base (Prefixo):").grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
@@ -1804,19 +1881,19 @@ class App(tk.Tk):
         cb_auto_cont.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 6))
 
         # --- BOTÕES DE AÇÃO ---
-        btn_run_renamer = RoundedButton(
-            left_panel, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
-            text="EXECUTAR RENOMEAÇÃO AGORA", bg=COLOR_ACCENT, fg="#ffffff",
-            font=("Segoe UI", 9, "bold"), height=40, command=self.run_renamer_real
-        )
-        btn_run_renamer.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(2, 15))
-
         btn_sim_renamer = RoundedButton(
-            left_panel, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            left_panel.content, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
             text="Simular Renomeação (Seguro)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
             font=("Segoe UI", 9, "bold"), height=40, command=self.run_renamer_simulation
         )
-        btn_sim_renamer.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=2)
+        btn_sim_renamer.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(10, 4))
+
+        btn_run_renamer = RoundedButton(
+            left_panel.content, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+            text="EXECUTAR RENOMEAÇÃO AGORA", bg=COLOR_ACCENT, fg="#ffffff",
+            font=("Segoe UI", 9, "bold"), height=40, command=self.run_renamer_real
+        )
+        btn_run_renamer.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(4, 15))
 
         # --- TERMINAL DE SAÍDA ---
         self.renamer_terminal = tk.Text(right_panel, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, insertbackground=COLOR_TEXT_PRIMARY, font=("Consolas", 9))
@@ -2086,7 +2163,7 @@ class App(tk.Tk):
         self.paned_card_copy = tk.PanedWindow(self.tab_card_copy, orient=tk.HORIZONTAL, bg=COLOR_BORDER, bd=0, sashwidth=6, sashrelief="flat", showhandle=True, handlesize=8, handlepad=8)
         self.paned_card_copy.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(self.paned_card_copy, bg=COLOR_BG_DARK, width=390)
+        left_panel = ScrollablePanel(self.paned_card_copy, bg=COLOR_BG_DARK, width=390)
         right_panel = ttk.LabelFrame(self.paned_card_copy, text=" Status / Terminal de Cópia do Cartão ")
 
         self.paned_card_copy.add(left_panel, minsize=370)
@@ -2097,7 +2174,7 @@ class App(tk.Tk):
         self.card_copy_running = False
 
         # --- SELEÇÃO DE ORIGEM ---
-        lf_src = ttk.LabelFrame(left_panel, text=" Origem no Cartão / Gravador / Câmera ")
+        lf_src = ttk.LabelFrame(left_panel.content, text=" Origem no Cartão / Gravador / Câmera ")
         lf_src.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(12, 4))
 
         ttk.Label(lf_src, text="Pasta Mãe no Cartão (ex: K:\\MULTI\\FOLDER01 ou K:\\DCIM):").pack(anchor="w", padx=8, pady=(4, 2))
@@ -2113,7 +2190,7 @@ class App(tk.Tk):
         btn_browse_src.pack(anchor="e", padx=8, pady=(2, 6))
 
         # --- SELEÇÃO DE DESTINO ---
-        lf_dst = ttk.LabelFrame(left_panel, text=" Pasta de Destino (Aplanada) ")
+        lf_dst = ttk.LabelFrame(left_panel.content, text=" Pasta de Destino (Aplanada) ")
         lf_dst.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
 
         ttk.Label(lf_dst, text="Diretório onde todos os arquivos serão copiados diretamente:").pack(anchor="w", padx=8, pady=(4, 2))
@@ -2139,7 +2216,7 @@ class App(tk.Tk):
         btn_browse_dst.pack(side=tk.RIGHT)
 
         # --- FILTRO DE TIPOS / EXTENSÕES ---
-        lf_exts = ttk.LabelFrame(left_panel, text=" Seleção de Tipos / Extensões ")
+        lf_exts = ttk.LabelFrame(left_panel.content, text=" Seleção de Tipos / Extensões ")
         lf_exts.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
 
         self.var_card_ext_aud = tk.BooleanVar(value=True)
@@ -2164,8 +2241,69 @@ class App(tk.Tk):
         entry_custom_ext = tk.Entry(lf_exts, textvariable=self.var_card_ext_custom, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9))
         entry_custom_ext.pack(fill=tk.X, padx=8, pady=(0, 5))
 
+        # --- FILTRO POR DATA DE CRIAÇÃO ---
+        lf_date = ttk.LabelFrame(left_panel.content, text=" Filtro por Data de Criação ")
+        lf_date.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
+
+        self.var_card_filter_date = tk.BooleanVar(value=False)
+        cb_filter_date = tk.Checkbutton(
+            lf_date, text="Filtrar apenas arquivos criados em data específica",
+            variable=self.var_card_filter_date, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            selectcolor=COLOR_BG_INPUT, activebackground=COLOR_BG_CARD,
+            command=self._on_toggle_card_date_filter
+        )
+        cb_filter_date.pack(anchor="w", padx=8, pady=(4, 2))
+
+        self.f_card_date_inputs = tk.Frame(lf_date, bg=COLOR_BG_CARD)
+        self.f_card_date_inputs.pack(fill=tk.X, padx=8, pady=(1, 3))
+
+        now = datetime.datetime.now()
+        self.var_card_day = tk.StringVar(value=f"{now.day:02d}")
+        self.var_card_month = tk.StringVar(value=f"{now.month:02d}")
+        self.var_card_year = tk.StringVar(value=str(now.year))
+
+        self.entry_card_day = tk.Entry(self.f_card_date_inputs, textvariable=self.var_card_day, width=3, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, justify="center", font=("Segoe UI", 9, "bold"))
+        self.entry_card_day.pack(side=tk.LEFT, padx=1)
+
+        self.lbl_card_slash1 = tk.Label(self.f_card_date_inputs, text="/", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED)
+        self.lbl_card_slash1.pack(side=tk.LEFT)
+
+        self.entry_card_month = tk.Entry(self.f_card_date_inputs, textvariable=self.var_card_month, width=3, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, justify="center", font=("Segoe UI", 9, "bold"))
+        self.entry_card_month.pack(side=tk.LEFT, padx=1)
+
+        self.lbl_card_slash2 = tk.Label(self.f_card_date_inputs, text="/", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED)
+        self.lbl_card_slash2.pack(side=tk.LEFT)
+
+        self.entry_card_year = tk.Entry(self.f_card_date_inputs, textvariable=self.var_card_year, width=5, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, justify="center", font=("Segoe UI", 9, "bold"))
+        self.entry_card_year.pack(side=tk.LEFT, padx=1)
+
+        self.btn_card_datepicker = HoverButton(
+            self.f_card_date_inputs, hover_bg=COLOR_ACCENT, hover_fg="#ffffff",
+            text=" Calendário ", bg=COLOR_BORDER, fg=COLOR_TEXT_PRIMARY, bd=0,
+            font=("Segoe UI", 8, "bold"), height=1, command=self.open_card_datepicker_modal
+        )
+        self.btn_card_datepicker.pack(side=tk.LEFT, padx=(6, 2))
+
+        self.btn_card_today = HoverButton(
+            self.f_card_date_inputs, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text=" Hoje ", bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, bd=1, relief="solid",
+            font=("Segoe UI", 8), height=1, command=self.set_card_date_today
+        )
+        self.btn_card_today.pack(side=tk.LEFT, padx=2)
+
+        self.lbl_card_date_hint = tk.Label(
+            lf_date, text="Todos os arquivos serão copiados (sem filtro de data).",
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8)
+        )
+        self.lbl_card_date_hint.pack(anchor="w", padx=8, pady=(0, 4))
+
+        for var in (self.var_card_day, self.var_card_month, self.var_card_year):
+            var.trace_add("write", lambda *args: self._on_card_date_change())
+
+        self._on_toggle_card_date_filter()
+
         # --- TRATAMENTO DE CONFLITOS DE NOMES ---
-        lf_conflict = ttk.LabelFrame(left_panel, text=" Tratamento de Conflito de Nomes ")
+        lf_conflict = ttk.LabelFrame(left_panel.content, text=" Tratamento de Conflito de Nomes ")
         lf_conflict.pack(side=tk.TOP, fill=tk.X, padx=15, pady=4)
 
         ttk.Label(lf_conflict, text="Ação ao detectar arquivo com mesmo nome:").pack(anchor="w", padx=8, pady=(4, 2))
@@ -2189,8 +2327,8 @@ class App(tk.Tk):
         cb_always_prefix.pack(anchor="w", padx=8, pady=(3, 6))
 
         # --- BOTÕES DE AÇÃO ---
-        f_actions = tk.Frame(left_panel, bg=COLOR_BG_DARK)
-        f_actions.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(4, 10))
+        f_actions = tk.Frame(left_panel.content, bg=COLOR_BG_DARK)
+        f_actions.pack(side=tk.TOP, fill=tk.X, padx=15, pady=(6, 15))
 
         self.btn_card_copy_run = RoundedButton(
             f_actions, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
@@ -2248,7 +2386,7 @@ class App(tk.Tk):
 
         btn_open_dst = HoverButton(
             bottom_term_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
-            text="Abrir Pasta de Destino no Explorer", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
+            text="Abrir Pasta de Destino", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid",
             font=("Segoe UI", 8, "bold"), command=self.open_card_dst_folder
         )
         btn_open_dst.pack(side=tk.RIGHT)
@@ -2291,6 +2429,101 @@ class App(tk.Tk):
                 messagebox.showerror("Erro", f"Não foi possível abrir a pasta: {e}", parent=self)
         else:
             messagebox.showwarning("Aviso", "A pasta de destino informada não existe ou não foi selecionada.", parent=self)
+
+    def _on_toggle_card_date_filter(self):
+        enabled = self.var_card_filter_date.get()
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.entry_card_day.config(state=state)
+        self.entry_card_month.config(state=state)
+        self.entry_card_year.config(state=state)
+        self.btn_card_datepicker.config(state=state)
+        self.btn_card_today.config(state=state)
+        if enabled:
+            d = self.var_card_day.get().strip()
+            m = self.var_card_month.get().strip()
+            y = self.var_card_year.get().strip()
+            self.lbl_card_date_hint.config(
+                text=f"Apenas arquivos criados em {d}/{m}/{y} serão copiados.",
+                fg=COLOR_ACCENT
+            )
+        else:
+            self.lbl_card_date_hint.config(
+                text="Todos os arquivos serão copiados (sem filtro de data).",
+                fg=COLOR_TEXT_MUTED
+            )
+
+    def _on_card_date_change(self):
+        if hasattr(self, 'var_card_filter_date') and self.var_card_filter_date.get():
+            d = self.var_card_day.get().strip()
+            m = self.var_card_month.get().strip()
+            y = self.var_card_year.get().strip()
+            self.lbl_card_date_hint.config(
+                text=f"Apenas arquivos criados em {d}/{m}/{y} serão copiados.",
+                fg=COLOR_ACCENT
+            )
+
+    def open_card_datepicker_modal(self):
+        """Abre o modal de calendário para a aba de Cópia do Cartão"""
+        dlg = CalendarDialog(self, self.var_card_day, self.var_card_month, self.var_card_year)
+        self.wait_window(dlg)
+        self._on_card_date_change()
+
+    def set_card_date_today(self):
+        now = datetime.datetime.now()
+        self.var_card_day.set(f"{now.day:02d}")
+        self.var_card_month.set(f"{now.month:02d}")
+        self.var_card_year.set(str(now.year))
+        self._on_card_date_change()
+
+    def get_selected_card_filter_date(self):
+        """Valida e retorna datetime.date se o filtro de data estiver ativo, ou None se desativado."""
+        if not self.var_card_filter_date.get():
+            return None
+        try:
+            d = int(self.var_card_day.get().strip())
+            m = int(self.var_card_month.get().strip())
+            y = int(self.var_card_year.get().strip())
+            return datetime.date(y, m, d)
+        except (ValueError, TypeError):
+            messagebox.showerror(
+                "Data Inválida",
+                "A data informada no filtro de criação é inválida.\nPor favor, insira um dia, mês e ano válidos (ex: DD/MM/AAAA) ou use o botão 'Calendário'.",
+                parent=self
+            )
+            return False
+
+    @staticmethod
+    def get_file_dates(filepath):
+        """
+        Retorna (creation_date, modification_date) de forma compatível e resiliente com Windows e macOS.
+        No macOS, st_birthtime obtém a data de criação nativa.
+        No Windows, st_ctime / st_birthtime é a data de criação nativa.
+        st_mtime obtém a data de gravação original pelo gravador ou câmera (essencial para volumes exFAT/FAT).
+        """
+        try:
+            st = os.stat(filepath)
+            m_date = datetime.date.fromtimestamp(st.st_mtime)
+            c_date = None
+
+            btime = getattr(st, 'st_birthtime', None)
+            if btime is not None and btime > 0:
+                try:
+                    c_date = datetime.date.fromtimestamp(btime)
+                except (ValueError, OverflowError):
+                    c_date = None
+
+            if c_date is None:
+                if sys.platform == "win32":
+                    try:
+                        c_date = datetime.date.fromtimestamp(st.st_ctime)
+                    except (ValueError, OverflowError):
+                        c_date = m_date
+                else:
+                    c_date = m_date
+
+            return c_date, m_date
+        except Exception:
+            return None, None
 
     def cancel_card_copy(self):
         if self.card_copy_running:
@@ -2349,8 +2582,12 @@ class App(tk.Tk):
             messagebox.showerror("Erro de Loops", "Origem e destino não podem ser a mesma pasta física.", parent=self)
             return
 
+        target_date = self.get_selected_card_filter_date()
+        if target_date is False:
+            return
+
         self._prepare_card_copy_ui()
-        threading.Thread(target=self._card_copy_worker, args=(src, dst, True), daemon=True).start()
+        threading.Thread(target=self._card_copy_worker, args=(src, dst, True, target_date), daemon=True).start()
 
     def run_card_copy_real(self):
         src = self.var_card_src.get().strip()
@@ -2383,18 +2620,23 @@ class App(tk.Tk):
         except Exception:
             pass
 
+        target_date = self.get_selected_card_filter_date()
+        if target_date is False:
+            return
+
+        filter_info = f"\nFiltro de Data: Apenas arquivos criados em {target_date.strftime('%d/%m/%Y')}" if target_date else "\nFiltro de Data: Todos os arquivos (sem restrição)"
         confirm = messagebox.askyesno(
             "Confirmar Cópia do Cartão",
-            f"Origem (Cartão): {src}\nDestino: {dst}\n\nConfirma a cópia de todos os arquivos das subpastas diretamente para o destino?",
+            f"Origem (Cartão): {src}\nDestino: {dst}{filter_info}\n\nConfirma a cópia dos arquivos elegíveis diretamente para o destino?",
             parent=self
         )
         if not confirm:
             return
 
         self._prepare_card_copy_ui()
-        threading.Thread(target=self._card_copy_worker, args=(src, dst, False), daemon=True).start()
+        threading.Thread(target=self._card_copy_worker, args=(src, dst, False, target_date), daemon=True).start()
 
-    def _card_copy_worker(self, src_dir, dst_dir, dry_run=True):
+    def _card_copy_worker(self, src_dir, dst_dir, dry_run=True, target_date=None):
         try:
             self.card_copy_running = True
             self.card_copy_cancel = False
@@ -2404,6 +2646,10 @@ class App(tk.Tk):
             self.log_queue.put((f"Iniciando Cópia do Cartão - Modo: {mode_title}", "cyan", "card_copy"))
             self.log_queue.put((f"Origem : {src_dir}", "normal", "card_copy"))
             self.log_queue.put((f"Destino: {dst_dir}", "normal", "card_copy"))
+            if target_date:
+                self.log_queue.put((f"Filtro : Apenas arquivos criados em {target_date.strftime('%d/%m/%Y')}", "cyan", "card_copy"))
+            else:
+                self.log_queue.put((f"Filtro : Todos os arquivos (sem filtro de data)", "muted", "card_copy"))
             self.log_queue.put((f"===========================================================\n", "cyan", "card_copy"))
 
             # Determinar extensões permitidas
@@ -2434,8 +2680,9 @@ class App(tk.Tk):
 
             self.log_queue.put((f"Escanendo estrutura de subpastas a partir da pasta mãe...", "muted", "card_copy"))
 
-            found_files = [] # list of (full_path, subfolder_name, filename, size_bytes)
+            found_files = [] # list of (full_path, subfolder_name, filename, size_bytes, date_str)
             ignored_count = 0
+            date_ignored_count = 0
             SYSTEM_IGNORES = {".ds_store", "thumbs.db", "desktop.ini"}
 
             for root, dirs, files in os.walk(src_dir):
@@ -2457,8 +2704,17 @@ class App(tk.Tk):
                     if match_all or ext in selected_exts:
                         full_path = os.path.join(root, f)
                         try:
+                            c_date, m_date = self.get_file_dates(full_path)
+                            if target_date:
+                                # Verifica se o arquivo foi criado na data especificada
+                                if c_date != target_date and m_date != target_date:
+                                    date_ignored_count += 1
+                                    continue
+
                             sz = os.path.getsize(full_path)
-                            found_files.append((full_path, subfolder_name, f, sz))
+                            effective_date = c_date or m_date
+                            d_str = effective_date.strftime("%d/%m/%Y") if effective_date else "N/A"
+                            found_files.append((full_path, subfolder_name, f, sz, d_str))
                         except Exception as e:
                             self.log_queue.put((f"[AVISO LEITURA] Erro ao ler metadados de '{f}': {e}", "warning", "card_copy"))
                             ignored_count += 1
@@ -2466,7 +2722,10 @@ class App(tk.Tk):
                         ignored_count += 1
 
             if not found_files:
-                self.log_queue.put(("[AVISO] Nenhum arquivo compatível encontrado nas subpastas da origem.", "warning", "card_copy"))
+                if target_date and date_ignored_count > 0:
+                    self.log_queue.put((f"[AVISO] Nenhum arquivo criado em {target_date.strftime('%d/%m/%Y')} foi encontrado ({date_ignored_count} arquivo(s) com outras datas ignorados).", "warning", "card_copy"))
+                else:
+                    self.log_queue.put(("[AVISO] Nenhum arquivo compatível encontrado nas subpastas da origem.", "warning", "card_copy"))
                 return
 
             total_files = len(found_files)
@@ -2474,6 +2733,8 @@ class App(tk.Tk):
             self.log_queue.put((f"Varredura concluída:", "normal", "card_copy"))
             self.log_queue.put((f" • Total de arquivos elegíveis: {total_files}", "normal", "card_copy"))
             self.log_queue.put((f" • Volume total de dados: {format_size(total_bytes)}", "normal", "card_copy"))
+            if target_date:
+                self.log_queue.put((f" • Filtro de data ativo: Apenas criados em {target_date.strftime('%d/%m/%Y')} ({date_ignored_count} arquivos em outras datas ignorados)", "cyan", "card_copy"))
             if ignored_count > 0:
                 self.log_queue.put((f" • Arquivos ignorados (outras extensões/sistema): {ignored_count}", "muted", "card_copy"))
             self.log_queue.put("-" * 55, "normal", "card_copy")
@@ -2521,7 +2782,7 @@ class App(tk.Tk):
 
             start_time = datetime.datetime.now()
 
-            for idx, (src_path, subfolder, orig_filename, f_size) in enumerate(found_files, 1):
+            for idx, (src_path, subfolder, orig_filename, f_size, f_date_str) in enumerate(found_files, 1):
                 if self.card_copy_cancel:
                     self.log_queue.put(("\n[INTERROMPIDO] Cópia cancelada pelo usuário.", "warning", "card_copy"))
                     break
@@ -2576,7 +2837,7 @@ class App(tk.Tk):
 
                 if dry_run:
                     conflict_tag = " (Renomeado/Resolvido)" if final_name != orig_filename else ""
-                    self.log_queue.put((f" [PRÉVIA {idx}/{total_files}] '{subfolder}/{orig_filename}' ➔ '{final_name}' ({format_size(f_size)}){conflict_tag}", "normal", "card_copy"))
+                    self.log_queue.put((f" [PRÉVIA {idx}/{total_files}] '{subfolder}/{orig_filename}' [{f_date_str}] ➔ '{final_name}' ({format_size(f_size)}){conflict_tag}", "normal", "card_copy"))
                     pct = int((idx / total_files) * 100)
                     self.after(0, lambda p=pct, i=idx, t=total_files: self._update_card_progress(p, f"Simulação: {i}/{t} arquivos analisados..."))
                 else:
@@ -2595,7 +2856,7 @@ class App(tk.Tk):
                             success_count += 1
                             bytes_copied += copied_size
                             rename_info = f" (como '{final_name}')" if final_name != orig_filename else ""
-                            self.log_queue.put((f" [OK {idx}/{total_files}] {subfolder}/{orig_filename}{rename_info} [{format_size(f_size)}]", "green", "card_copy"))
+                            self.log_queue.put((f" [OK {idx}/{total_files}] {subfolder}/{orig_filename}{rename_info} [{f_date_str} | {format_size(f_size)}]", "green", "card_copy"))
                             existing_in_dst.add(final_name.lower())
 
                     except PermissionError:
@@ -2621,7 +2882,7 @@ class App(tk.Tk):
                 self.log_queue.put((f"Processo de Cópia Finalizado em {dur_str}!", "green" if fail_count == 0 else "warning", "card_copy"))
                 self.log_queue.put((f"Sucesso: {success_count} arquivo(s) copiado(s) ({format_size(bytes_copied)})", "green", "card_copy"))
                 if skipped_count > 0:
-                    self.log_queue.put((f"Pulsados: {skipped_count} arquivo(s)", "muted", "card_copy"))
+                    self.log_queue.put((f"Pulados: {skipped_count} arquivo(s)", "muted", "card_copy"))
                 if fail_count > 0:
                     self.log_queue.put((f"Falhas: {fail_count} arquivo(s)", "red", "card_copy"))
                 self.after(0, lambda: self._update_card_progress(100, f"Concluído! {success_count} copiados, {fail_count} falhas."))

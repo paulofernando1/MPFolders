@@ -1,10 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# Script de Build para o Silent Guardian (Gerenciador de Projetos)
+# Script de Build para o MPFolders (Gerenciador de Projetos)
 # Evita locks de arquivo do Dropbox compilando em uma pasta temporária externa.
 # ==============================================================================
 
-PROJECT_NAME="Silent_Guardian"
+PROJECT_NAME="MPFolders"
 SOURCE_FILE="gerenciador_projetos_backup.py"
 ICON_FILE="icon.ico"
 
@@ -85,33 +85,29 @@ FOUND_ANY=false
 # 4.1. macOS App Bundle (.app)
 if [ -d "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" ]; then
     echo "App Bundle (.app) detectado. Copiando..."
-    cp -R "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" "$WORKSPACE_DIR/dist/"
     cp -R "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.app" "$WORKSPACE_DIR/dist/MPFolders.app"
     
     # Assinatura ad-hoc no macOS para evitar bloqueio do Gatekeeper
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "Aplicando assinatura ad-hoc codesign no macOS..."
-        codesign --force --deep --sign - "$WORKSPACE_DIR/dist/${PROJECT_NAME}.app" 2>/dev/null || true
         codesign --force --deep --sign - "$WORKSPACE_DIR/dist/MPFolders.app" 2>/dev/null || true
     fi
-    echo -e "\e[32mSucesso! App Bundle gerado: $WORKSPACE_DIR/dist/MPFolders.app e ${PROJECT_NAME}.app\e[0m"
+    echo -e "\e[32mSucesso! App Bundle gerado: $WORKSPACE_DIR/dist/MPFolders.app\e[0m"
     FOUND_ANY=true
 fi
 
 # 4.2. Windows Executável (.exe)
 if [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" ]; then
-    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" "$WORKSPACE_DIR/dist/"
     cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}.exe" "$WORKSPACE_DIR/dist/MPFolders.exe"
-    echo -e "\e[32mSucesso! Executável gerado: $WORKSPACE_DIR/dist/MPFolders.exe e ${PROJECT_NAME}.exe\e[0m"
+    echo -e "\e[32mSucesso! Executável gerado: $WORKSPACE_DIR/dist/MPFolders.exe\e[0m"
     FOUND_ANY=true
 fi
 
 # 4.3. Binário Standalone Unix/Linux/macOS
 if [ -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" ]; then
-    cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/"
     cp -f "$TEMP_BUILD_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/MPFolders"
-    chmod +x "$WORKSPACE_DIR/dist/${PROJECT_NAME}" "$WORKSPACE_DIR/dist/MPFolders"
-    echo -e "\e[32mSucesso! Binário gerado: $WORKSPACE_DIR/dist/MPFolders e ${PROJECT_NAME}\e[0m"
+    chmod +x "$WORKSPACE_DIR/dist/MPFolders"
+    echo -e "\e[32mSucesso! Binário gerado: $WORKSPACE_DIR/dist/MPFolders\e[0m"
     FOUND_ANY=true
 fi
 

@@ -50,15 +50,9 @@ jobs:
           if [ -d "MPFolders.app" ]; then
             zip -r -y MPFolders_macOS_app.zip MPFolders.app
           fi
-          if [ -d "Silent_Guardian.app" ]; then
-            zip -r -y Silent_Guardian_macOS_app.zip Silent_Guardian.app
-          fi
           # Empacota binários standalone caso gerados
           if [ -f "MPFolders" ]; then
             zip -y MPFolders_macOS_binary.zip MPFolders
-          fi
-          if [ -f "Silent_Guardian" ]; then
-            zip -y Silent_Guardian_macOS_binary.zip Silent_Guardian
           fi
 
           echo "Arquivos empacotados em dist/:"

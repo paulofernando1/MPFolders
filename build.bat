@@ -1,11 +1,11 @@
 @echo off
 setlocal EnableDelayedExpansion
 :: ==============================================================================
-:: Script de Build para o Silent Guardian (Gerenciador de Projetos)
+:: Script de Build para o MPFolders (Gerenciador de Projetos)
 :: Evita locks de arquivo do Dropbox compilando em uma pasta temporária externa.
 :: ==============================================================================
 
-set "PROJECT_NAME=Silent_Guardian"
+set "PROJECT_NAME=MPFolders"
 set "SOURCE_FILE=gerenciador_projetos_backup.py"
 set "ICON_FILE=icon.ico"
 

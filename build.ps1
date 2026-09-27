@@ -4,7 +4,7 @@ Script de Build para o Silent Guardian (Gerenciador de Projetos)
 Evita locks de arquivo do Dropbox compilando em uma pasta temporária externa.
 #>
 
-$projectName = "Silent_Guardian"
+$projectName = "MPFolders"
 $sourceFile = "gerenciador_projetos_backup.py"
 $iconFile = "icon.ico"
 
@@ -64,9 +64,8 @@ if (-not (Test-Path $distDir)) {
 
 $exePath = Join-Path $tempBuildDir "dist\$projectName.exe"
 if (Test-Path $exePath) {
-    Copy-Item -Path $exePath -Destination $distDir -Force
     Copy-Item -Path $exePath -Destination (Join-Path $distDir "MPFolders.exe") -Force
-    Write-Host "Sucesso! Executável gerado: $(Join-Path $distDir "$projectName.exe") e MPFolders.exe" -ForegroundColor Green
+    Write-Host "Sucesso! Executável gerado: $(Join-Path $distDir "MPFolders.exe")" -ForegroundColor Green
 } else {
     Write-Host "ERRO: O executável não foi encontrado. Falha no PyInstaller." -ForegroundColor Red
 }
