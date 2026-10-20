@@ -1,4 +1,5 @@
-# 📂 MPFolders (v1.2)
+# 📂 MPFolders (v1.1.0)
+
 > **Workflow & Projetos** — Ferramenta portátil integrada para automação, organização estrutural, comparação, mapeamento de rede e backup seguro.
 
 ---
@@ -38,15 +39,18 @@ O **MPFolders** é uma ferramenta de produtividade desenvolvida em Python e Tkin
 ## 🛠️ Instalação e Execução
 
 ### Pré-requisitos
+
 - **Python 3.10** ou superior
 - Bibliotecas nativas do Python (`tkinter`, `shutil`, `json`, `subprocess`, etc.)
 
 ### Execução em Desenvolvimento
+
 ```bash
 python gerenciador_projetos_backup.py
 ```
 
 ### Compilação Local (Gerar Executável Portátil)
+
 O projeto inclui scripts automatizados de build direcionados à pasta temporária local para evitar travas do Dropbox, gerando a saída final na pasta `dist/`:
 
 - **Windows (PowerShell)**:
@@ -68,6 +72,7 @@ O projeto inclui scripts automatizados de build direcionados à pasta temporári
 ## 🚀 Integração Contínua (GitHub Actions)
 
 O repositório inclui suporte pronto para compilação na nuvem:
+
 - 💻 **Build macOS**: O arquivo `.github/workflows/build-mac.yml` roda em agentes `macos-latest` para gerar e assinar automaticamente o aplicativo empacotado `MPFolders.app` (ZIP) via PyInstaller a cada nova modificação na branch principal (`main`/`master`).
 
 ---
@@ -75,6 +80,7 @@ O repositório inclui suporte pronto para compilação na nuvem:
 ## ⚙️ Estrutura do Arquivo de Configuração
 
 O arquivo `config_gerenciador.json` é gerado na primeira execução na mesma pasta do executável:
+
 ```json
 {
     "templates": {
@@ -93,4 +99,5 @@ O arquivo `config_gerenciador.json` é gerado na primeira execução na mesma pa
 ```
 
 ---
+
 *Paulo Fernando de M. E. @ Gandget S&P © Todos os direitos reservados.*

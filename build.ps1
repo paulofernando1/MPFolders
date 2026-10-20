@@ -63,11 +63,47 @@ if (-not (Test-Path $distDir)) {
 }
 
 $exePath = Join-Path $tempBuildDir "dist\$projectName.exe"
+$targetExe = Join-Path $distDir "MPFolders.exe"
+$oldExe = Join-Path $distDir "MPFolders.exe.old"
+
+# Limpa resíduos anteriores se não estiverem em uso
+if (Test-Path $oldExe) {
+    Remove-Item -Path $oldExe -Force -ErrorAction SilentlyContinue
+}
+
 if (Test-Path $exePath) {
-    Copy-Item -Path $exePath -Destination (Join-Path $distDir "MPFolders.exe") -Force
-    Write-Host "Sucesso! Executável gerado: $(Join-Path $distDir "MPFolders.exe")" -ForegroundColor Green
+    $copied = $false
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            Copy-Item -Path $exePath -Destination $targetExe -Force -ErrorAction Stop
+            $copied = $true
+            break
+        } catch {
+            # Se o executável estiver aberto ou travado pelo Dropbox, renomeia o binário em execução (.old) para liberar o caminho
+            if (Test-Path $targetExe) {
+                try {
+                    Move-Item -Path $targetExe -Destination $oldExe -Force -ErrorAction Stop
+                    Copy-Item -Path $exePath -Destination $targetExe -Force -ErrorAction Stop
+                    Remove-Item -Path $oldExe -Force -ErrorAction SilentlyContinue
+                    $copied = $true
+                    break
+                } catch {
+                    Start-Sleep -Seconds 1
+                }
+            } else {
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+    if ($copied) {
+        Write-Host "Sucesso! Executável gerado: $targetExe" -ForegroundColor Green
+    } else {
+        Write-Host "ERRO: Não foi possível substituir $targetExe (arquivo em uso)." -ForegroundColor Red
+        exit 1
+    }
 } else {
     Write-Host "ERRO: O executável não foi encontrado. Falha no PyInstaller." -ForegroundColor Red
+    exit 1
 }
 
 # 5. Limpeza

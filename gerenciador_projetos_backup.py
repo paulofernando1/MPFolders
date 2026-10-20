@@ -44,8 +44,10 @@ def round_window_corners(window):
         pass
 
 # ==========================================
-# CONFIGURAÇÕES DE CORES E ESTILO (SILENT GUARDIAN THEME)
+# VERSÃO E CONFIGURAÇÕES DE CORES E ESTILO (SILENT GUARDIAN THEME)
 # ==========================================
+APP_VERSION = "1.1.0"
+
 COLOR_BG_DARK = "#131315"      # background
 COLOR_BG_CARD = "#201f21"      # surface-container
 COLOR_BG_INPUT = "#0e0e10"     # surface-container-lowest
@@ -1159,7 +1161,7 @@ class App(tk.Tk):
         # Evitar sobreposição de ícone pelo Python na barra de tarefas (Windows)
         if sys.platform == "win32":
             try:
-                myappid = 'mpfolders.workflowbackup.app.1'
+                myappid = f'mpfolders.workflowbackup.app.{APP_VERSION}'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass
@@ -1208,7 +1210,7 @@ class App(tk.Tk):
 
         self.load_config()  # Carrega as pastas, geometrias e sashes salvas anteriormente
 
-        self.title("MPFolders v1.1 - Workflow, Backup & Gerenciador")
+        self.title(f"MPFolders v{APP_VERSION} - Workflow, Backup & Gerenciador")
         self.geometry(self.window_geometry)
         self.configure(bg=COLOR_BG_DARK)
         self.minsize(1000, 700)
@@ -1339,7 +1341,7 @@ class App(tk.Tk):
         header_frame = tk.Frame(self, bg=COLOR_BG_DARK, pady=6, padx=15)
         header_frame.pack(fill=tk.X)
         
-        lbl_title = ttk.Label(header_frame, text="MPFolders v1.1", style="Header.TLabel")
+        lbl_title = ttk.Label(header_frame, text=f"MPFolders v{APP_VERSION}", style="Header.TLabel")
         lbl_title.pack(anchor="w")
         
         lbl_sub = ttk.Label(header_frame, text="Workflow & Projetos - Ferramenta portátil integrada para automação, comparação e segurança.", style="Sub.TLabel")
@@ -5227,7 +5229,7 @@ class App(tk.Tk):
             md_lines.append("")
 
             md_lines.append("---")
-            md_lines.append("*Relatório gerado automaticamente pelo MPFolders — Ferramenta Portátil de Gestão de Pastas.*")
+            md_lines.append(f"*Relatório gerado automaticamente pelo MPFolders v{APP_VERSION} — Ferramenta Portátil de Gestão de Pastas.*")
 
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(md_lines))
