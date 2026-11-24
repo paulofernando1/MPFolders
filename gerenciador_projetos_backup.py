@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import ctypes
 import errno
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import winreg
@@ -178,15 +179,16 @@ def to_long_path(path):
     """
     if sys.platform != "win32" or not path or not isinstance(path, str):
         return path
-    if path.startswith("\\\\?\\"):
-        return path
+    p = path.strip().strip('"').strip("'").replace("/", "\\")
+    if p.startswith("\\\\?\\"):
+        return p
     try:
-        abs_p = os.path.abspath(path)
+        abs_p = os.path.abspath(p)
         if abs_p.startswith("\\\\"):
-            return "\\\\?\\UNC\\" + abs_p.lstrip("\\")
+            return "\\\\?\\UNC\\" + abs_p[2:]
         return "\\\\?\\" + abs_p
     except Exception:
-        return path
+        return p
 
 def from_long_path(path):
     """Remove prefixo \\\\?\\ ou \\\\?\\UNC\\ para exibição amigável em telas e logs."""
@@ -289,20 +291,18 @@ def check_cloud_file_attributes(file_path):
         return None
     try:
         lp = to_long_path(file_path)
-        if not os.path.exists(lp):
-            return None
         FILE_ATTRIBUTE_OFFLINE = 0x1000
         FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
         attrs = ctypes.windll.kernel32.GetFileAttributesW(lp)
-        if attrs != -1:
+        if attrs not in (-1, 0xFFFFFFFF):
             if (attrs & FILE_ATTRIBUTE_OFFLINE) or (attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
                 return "Online-Only (Nuvem)"
     except Exception:
         pass
     return None
 
-def compute_file_hash(filepath, block_size=1024*1024, stop_event=None):
-    """Calcula hash SHA-256 do arquivo em blocos de 1MB com suporte a cancelamento imediato."""
+def compute_file_hash(filepath, block_size=4*1024*1024, stop_event=None):
+    """Calcula hash SHA-256 do arquivo em blocos de 4MB com suporte a cancelamento imediato."""
     hasher = hashlib.sha256()
     with open(to_long_path(filepath), "rb") as f:
         while True:
@@ -344,59 +344,467 @@ def safe_compute_file_hash(filepath, stop_event=None, max_retries=3, delay=0.15)
             return None, str(e)
     return None, "Falha de leitura"
 
-def safe_copy_file_resilient(src, dst, max_retries=3, delay=0.35):
-    """
-    Copia arquivo de src para dst com preservação de metadados (shutil.copy2).
-    Possui suporte a caminhos longos (to_long_path), resiliência a locks temporários
-    de sincronização em nuvem (WinError 32) e diagnóstico preciso de limites de caminho e
-    extensão de nome de arquivo (WinError 206 / ENAMETOOLONG / WinError 123).
-    """
-    lp_dst = to_long_path(dst)
-    lp_src = to_long_path(src)
 
+def _read_diff_entry_metadata(entry, full_path, is_cloud, use_entry_stat=True):
+    """Lê metadados de um DirEntry reutilizando cache do scandir e tratando locks de nuvem/caminhos longos."""
+    lp_path = to_long_path(full_path)
+    for attempt in range(3):
+        try:
+            st = entry.stat(follow_symlinks=False) if (use_entry_stat and attempt == 0) else os.stat(lp_path)
+            ctime = getattr(st, "st_birthtime", st.st_ctime)
+            cloud_status = check_cloud_file_attributes(lp_path) if is_cloud else None
+            return {
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "ctime": ctime,
+                "path": full_path,
+                "cloud_status": cloud_status,
+            }
+        except PermissionError as pe:
+            # WinError 32: arquivo temporariamente bloqueado por Dropbox ou OneDrive
+            if getattr(pe, 'winerror', None) == 32 and attempt < 2:
+                time.sleep(0.12)
+                continue
+            return {
+                "size": 0, "mtime": 0, "ctime": 0, "path": full_path,
+                "cloud_status": "Bloqueado por Sincronização em Nuvem"
+            }
+        except OSError as oe:
+            win_err = getattr(oe, 'winerror', None)
+            err_no = getattr(oe, 'errno', None)
+            if win_err == 206 or err_no == getattr(errno, 'ENAMETOOLONG', 36):
+                return {
+                    "size": 0, "mtime": 0, "ctime": 0, "path": full_path,
+                    "cloud_status": "Caminho longo excede MAX_PATH (WinError 206)"
+                }
+            return None
+        except Exception:
+            return None
+    return None
+
+
+def _scan_dir_for_diff(base_dir, is_cloud=False, recursive=True, ignore_hidden=True, stop_event=None):
+    """Varre um diretório usando os.scandir iterativo para reduzir chamadas de stat e suportar caminhos longos."""
+    scanned = {}
+    clean_base = from_long_path(base_dir)
+    stack = [(clean_base, "")]
+
+    while stack:
+        if stop_event and stop_event.is_set():
+            break
+        cur_dir, rel_prefix = stack.pop()
+        try:
+            with os.scandir(to_long_path(cur_dir)) as it:
+                for entry in it:
+                    if stop_event and stop_event.is_set():
+                        break
+                    name = entry.name
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive:
+                                sub_rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                                stack.append((from_long_path(entry.path), sub_rel))
+                            continue
+                        use_entry_stat = entry.is_file(follow_symlinks=False)
+                        if not use_entry_stat and not entry.is_file():
+                            continue
+                    except OSError:
+                        continue
+
+                    if ignore_hidden and (name.startswith(".") or name.lower() in ("thumbs.db", "desktop.ini")):
+                        continue
+
+                    full_p = from_long_path(entry.path)
+                    meta = _read_diff_entry_metadata(entry, full_p, is_cloud, use_entry_stat=use_entry_stat)
+                    if meta:
+                        rel_p = f"{rel_prefix}/{name}" if rel_prefix else name
+                        meta["rel_path"] = rel_p
+                        scanned[rel_p.lower()] = meta
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+
+    return scanned
+
+
+def _compute_diff_results(
+    dir_a, dir_b, cmp_size=True, cmp_mtime=True, cmp_ctime=False,
+    cmp_name=False, cmp_integrity=False, recursive=True, ignore_hidden=True,
+    tolerance=2.0, stop_event=None, status_callback=None
+):
+    """Executa varredura paralela (A e B), comparação de metadados e hash SHA-256 paralelo."""
+    for d_name, d_path in [("Pasta A", dir_a), ("Pasta B", dir_b)]:
+        try:
+            if not os.path.exists(to_long_path(d_path)):
+                raise FileNotFoundError(f"{d_name} não foi encontrada ou o servidor está inacessível: {d_path}")
+        except OSError as oe:
+            win_err = getattr(oe, 'winerror', None)
+            if win_err in (53, 64, 121, 1231):
+                raise OSError(f"Falha de comunicação com o NAS na {d_name} (WinError {win_err}): Servidor de rede inacessível ou conexão instável.")
+            raise
+
+    badge_a, _, is_cloud_a, _, _ = get_path_storage_info(dir_a)
+    badge_b, _, is_cloud_b, _, _ = get_path_storage_info(dir_b)
+    if status_callback:
+        status_callback(f"Varrendo Pastas A e B em paralelo ({badge_a} | {badge_b})...")
+
+    with ThreadPoolExecutor(max_workers=2) as scan_pool:
+        fut_a = scan_pool.submit(_scan_dir_for_diff, dir_a, is_cloud_a, recursive, ignore_hidden, stop_event)
+        fut_b = scan_pool.submit(_scan_dir_for_diff, dir_b, is_cloud_b, recursive, ignore_hidden, stop_event)
+        files_a = fut_a.result()
+        files_b = fut_b.result()
+
+    if stop_event and stop_event.is_set():
+        return None
+
+    if status_callback:
+        status_callback("Comparando metadados e analisando divergências...")
+
+    all_keys = sorted(set(files_a.keys()) | set(files_b.keys()))
+    results = []
+    hash_jobs = []
+
+    for key in all_keys:
+        if stop_event and stop_event.is_set():
+            return None
+
+        in_a = key in files_a
+        in_b = key in files_b
+
+        if in_a and not in_b:
+            info_a = files_a[key]
+            det = "Não existe na Pasta B"
+            if info_a.get("cloud_status"):
+                det += f" [☁ {info_a['cloud_status']}]"
+            results.append({
+                "status": "only_a",
+                "status_text": "Apenas em A",
+                "rel_path": info_a["rel_path"],
+                "size_a": info_a["size"],
+                "size_b": None,
+                "mtime_a": info_a["mtime"],
+                "mtime_b": None,
+                "details": det,
+                "path_a": info_a["path"],
+                "path_b": None
+            })
+        elif in_b and not in_a:
+            info_b = files_b[key]
+            det = "Não existe na Pasta A"
+            if info_b.get("cloud_status"):
+                det += f" [☁ {info_b['cloud_status']}]"
+            results.append({
+                "status": "only_b",
+                "status_text": "Apenas em B",
+                "rel_path": info_b["rel_path"],
+                "size_a": None,
+                "size_b": info_b["size"],
+                "mtime_a": None,
+                "mtime_b": info_b["mtime"],
+                "details": det,
+                "path_a": None,
+                "path_b": info_b["path"]
+            })
+        else:
+            info_a = files_a[key]
+            info_b = files_b[key]
+            rel_p = info_a["rel_path"]
+            diff_reasons = []
+
+            if cmp_name and info_a["rel_path"] != info_b["rel_path"]:
+                name_a = os.path.basename(info_a["rel_path"])
+                name_b = os.path.basename(info_b["rel_path"])
+                diff_reasons.append(f"🔤 Nome/Caixa ({name_a} vs {name_b})")
+
+            dt_diff = info_a["mtime"] - info_b["mtime"]
+            size_diff = info_a["size"] - info_b["size"]
+
+            newer_folder = "A" if dt_diff > tolerance else ("B" if dt_diff < -tolerance else "equal")
+            if newer_folder == "A":
+                newer_str = f"A é mais recente (+{format_timedelta_human(dt_diff)})"
+            elif newer_folder == "B":
+                newer_str = f"B é mais recente (+{format_timedelta_human(-dt_diff)})"
+            else:
+                newer_str = "Mesma data"
+
+            if size_diff > 0:
+                size_str = f"A é maior (+{format_size(size_diff)})"
+            elif size_diff < 0:
+                size_str = f"B é maior (+{format_size(-size_diff)})"
+            else:
+                size_str = "Mesmo tamanho"
+
+            if cmp_mtime and newer_folder != "equal":
+                diff_reasons.append(f"🕒 {newer_str}")
+
+            if cmp_size and info_a["size"] != info_b["size"]:
+                diff_reasons.append(f"📦 {size_str}")
+
+            if cmp_ctime and abs(info_a["ctime"] - info_b["ctime"]) > tolerance:
+                ct_a = datetime.datetime.fromtimestamp(info_a["ctime"]).strftime("%d/%m/%Y %H:%M")
+                ct_b = datetime.datetime.fromtimestamp(info_b["ctime"]).strftime("%d/%m/%Y %H:%M")
+                diff_reasons.append(f"📅 Criação ({ct_a} vs {ct_b})")
+
+            if cmp_integrity and info_a["size"] == info_b["size"] and info_a["size"] > 0:
+                hash_jobs.append((len(results), info_a, info_b, diff_reasons, newer_folder, newer_str, size_str, rel_p))
+                results.append(None)
+                continue
+
+            if cmp_integrity and info_a["size"] != info_b["size"] and not cmp_size:
+                diff_reasons.append("⚠ Conteúdo divergente (tamanhos distintos)")
+
+            if info_a.get("cloud_status"):
+                diff_reasons.append(f"[☁ A: {info_a['cloud_status']}]")
+            if info_b.get("cloud_status"):
+                diff_reasons.append(f"[☁ B: {info_b['cloud_status']}]")
+
+            if diff_reasons:
+                results.append({
+                    "status": "diff",
+                    "status_text": "Diferente",
+                    "rel_path": rel_p,
+                    "size_a": info_a["size"],
+                    "size_b": info_b["size"],
+                    "mtime_a": info_a["mtime"],
+                    "mtime_b": info_b["mtime"],
+                    "newer_folder": newer_folder,
+                    "newer_desc": newer_str,
+                    "size_desc": size_str,
+                    "details": " | ".join(diff_reasons),
+                    "path_a": info_a["path"],
+                    "path_b": info_b["path"]
+                })
+            else:
+                match_detail = "Metadados e integridade (SHA-256) coincidem" if cmp_integrity else "Metadados selecionados coincidem"
+                results.append({
+                    "status": "match",
+                    "status_text": "Idêntico",
+                    "rel_path": rel_p,
+                    "size_a": info_a["size"],
+                    "size_b": info_b["size"],
+                    "mtime_a": info_a["mtime"],
+                    "mtime_b": info_b["mtime"],
+                    "details": match_detail,
+                    "path_a": info_a["path"],
+                    "path_b": info_b["path"]
+                })
+
+    if hash_jobs:
+        total_hashes = len(hash_jobs)
+        completed_hashes = 0
+        last_status_ts = 0.0
+        max_workers = min(4, os.cpu_count() or 2)
+
+        def _hash_pair(job):
+            idx, info_a, info_b = job[0], job[1], job[2]
+            if stop_event and stop_event.is_set():
+                return idx, None, None, False
+            hash_a, err_a = safe_compute_file_hash(info_a["path"], stop_event=stop_event)
+            if (stop_event and stop_event.is_set()) or err_a:
+                return idx, err_a, None, False
+            hash_b, err_b = safe_compute_file_hash(info_b["path"], stop_event=stop_event)
+            if (stop_event and stop_event.is_set()) or err_b:
+                return idx, None, err_b, False
+            return idx, None, None, (hash_a != hash_b)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as hash_pool:
+            future_to_job = {hash_pool.submit(_hash_pair, job): job for job in hash_jobs}
+            for fut in as_completed(future_to_job):
+                if stop_event and stop_event.is_set():
+                    for pending in future_to_job:
+                        pending.cancel()
+                    return None
+                idx, err_a, err_b, hash_mismatch = fut.result()
+                _, info_a, info_b, diff_reasons, newer_folder, newer_str, size_str, rel_p = future_to_job[fut]
+                completed_hashes += 1
+
+                if status_callback:
+                    now_ts = time.monotonic()
+                    if now_ts - last_status_ts >= 0.15 or completed_hashes == total_hashes:
+                        last_status_ts = now_ts
+                        status_callback(f"Checando integridade (SHA-256 {completed_hashes}/{total_hashes}): {os.path.basename(rel_p)}...")
+
+                if err_a:
+                    diff_reasons.append(f"❌ Erro leitura Pasta A: {err_a}")
+                elif err_b:
+                    diff_reasons.append(f"❌ Erro leitura Pasta B: {err_b}")
+                elif hash_mismatch:
+                    diff_reasons.append("⚠ Integridade violada / Hash SHA-256 divergente")
+
+                if info_a.get("cloud_status"):
+                    diff_reasons.append(f"[☁ A: {info_a['cloud_status']}]")
+                if info_b.get("cloud_status"):
+                    diff_reasons.append(f"[☁ B: {info_b['cloud_status']}]")
+
+                if diff_reasons:
+                    results[idx] = {
+                        "status": "diff",
+                        "status_text": "Diferente",
+                        "rel_path": rel_p,
+                        "size_a": info_a["size"],
+                        "size_b": info_b["size"],
+                        "mtime_a": info_a["mtime"],
+                        "mtime_b": info_b["mtime"],
+                        "newer_folder": newer_folder,
+                        "newer_desc": newer_str,
+                        "size_desc": size_str,
+                        "details": " | ".join(diff_reasons),
+                        "path_a": info_a["path"],
+                        "path_b": info_b["path"]
+                    }
+                else:
+                    results[idx] = {
+                        "status": "match",
+                        "status_text": "Idêntico",
+                        "rel_path": rel_p,
+                        "size_a": info_a["size"],
+                        "size_b": info_b["size"],
+                        "mtime_a": info_a["mtime"],
+                        "mtime_b": info_b["mtime"],
+                        "details": "Metadados e integridade (SHA-256) coincidem",
+                        "path_a": info_a["path"],
+                        "path_b": info_b["path"]
+                    }
+
+    if stop_event and stop_event.is_set():
+        return None
+    return results
+
+def safe_copy_file_resilient(src, dst, max_retries=3, delay=0.35, force_override=False):
+    """
+    Copia arquivo de src para dst com preservação de metadados e resiliência extrema:
+    - Previne WinError 87 (Parâmetro Incorreto): isola a cópia de dados (copyfile) da cópia de metadados (copystat),
+      não abortando se o destino (NAS/Nuvem/FAT) recusar timestamps ou atributos de arquivo;
+    - Remove atributos Somente Leitura (Read-Only) preventivamente no destino antes de sobrescrever;
+    - Tenta inicialmente via namespace longo (to_long_path) e, caso ocorra WinError 87, 123 ou 1 (não suportado
+      pela controladora de rede/Samba), realiza fallback automático para o caminho canônico do Windows;
+    - Suporte a retentativas automáticas contra locks de sincronização em nuvem (WinError 32);
+    - Em modo force_override=True, sanitiza caminhos (remove espaços/pontos finais em pastas) e força cópia em streaming.
+    """
+    clean_src = from_long_path(src)
+    clean_dst = from_long_path(dst)
+
+    if force_override:
+        # Sanitiza componentes de pastas no destino (evita trailing spaces/dots que causam WinError 87 no Windows)
+        parts = clean_dst.split(os.sep)
+        sanitized_parts = [parts[0]] + [pt.strip(" .") for pt in parts[1:] if pt]
+        clean_dst = os.sep.join(sanitized_parts)
+
+    lp_dst = to_long_path(clean_dst)
+    lp_src = to_long_path(clean_src)
+
+    # Cria diretório de destino
     try:
         os.makedirs(os.path.dirname(lp_dst), exist_ok=True)
-    except OSError as de:
-        win_err = getattr(de, 'winerror', None)
-        err_no = getattr(de, 'errno', None)
-        if win_err == 206 or err_no == getattr(errno, 'ENAMETOOLONG', 36):
-            return False, f"Caminho da pasta excede o limite do sistema (WinError 206: MAX_PATH): {from_long_path(os.path.dirname(dst))}"
-        return False, f"Falha ao criar diretório de destino: {str(de)}"
+    except Exception:
+        try:
+            os.makedirs(os.path.dirname(clean_dst), exist_ok=True)
+        except OSError as de:
+            win_err = getattr(de, 'winerror', None)
+            err_no = getattr(de, 'errno', None)
+            if win_err == 206 or err_no == getattr(errno, 'ENAMETOOLONG', 36):
+                return False, f"Caminho da pasta excede o limite do sistema (WinError 206: MAX_PATH): {os.path.dirname(clean_dst)}"
+            return False, f"Falha ao criar diretório de destino: {str(de)}"
+
+    # Remove atributo Somente Leitura (Read-Only) preventivamente no destino se o arquivo já existir
+    for chk_p in (lp_dst, clean_dst):
+        try:
+            if os.path.exists(chk_p):
+                if sys.platform == "win32":
+                    ctypes.windll.kernel32.SetFileAttributesW(chk_p, 0x80)  # FILE_ATTRIBUTE_NORMAL
+                os.chmod(chk_p, 0o666)
+                break
+        except Exception:
+            pass
 
     last_err = None
     for attempt in range(max_retries):
         try:
-            shutil.copy2(lp_src, lp_dst)
+            data_copied = False
+            # Tenta copyfile primeiro com namespace longo e depois com caminho canônico
+            for s_cand, d_cand in [(lp_src, lp_dst), (clean_src, clean_dst)]:
+                try:
+                    shutil.copyfile(s_cand, d_cand)
+                    data_copied = True
+                    break
+                except OSError as ce:
+                    last_err = ce
+                    w_err = getattr(ce, 'winerror', None)
+                    if w_err in (87, 123, 1, 50) or getattr(ce, 'errno', None) == getattr(errno, 'EINVAL', 22):
+                        continue
+                    raise
+
+            # Fallback de streaming binário em blocos de 4MB caso o sistema operacional recuse CopyFile
+            if not data_copied:
+                try:
+                    with open(clean_src, "rb") as fsrc, open(clean_dst, "wb") as fdst:
+                        shutil.copyfileobj(fsrc, fdst, length=4*1024*1024)
+                    data_copied = True
+                except Exception as b_err:
+                    last_err = b_err
+                    raise
+
+            # Copia metadados e timestamps de forma tolerante (não invalida a cópia se o destino recusar SetFileTime)
+            try:
+                shutil.copystat(lp_src, lp_dst)
+            except Exception:
+                try:
+                    shutil.copystat(clean_src, clean_dst)
+                except Exception:
+                    try:
+                        st = os.stat(clean_src)
+                        os.utime(clean_dst, (int(st.st_atime), int(st.st_mtime)))
+                    except Exception:
+                        pass
+
+            # Validação pós-cópia pelo tamanho do arquivo
+            try:
+                sz_s = os.path.getsize(clean_src)
+                sz_d = os.path.getsize(clean_dst)
+                if sz_s == sz_d:
+                    return True, None
+            except Exception:
+                if os.path.exists(clean_dst):
+                    return True, None
+
             return True, None
+
         except PermissionError as pe:
             last_err = pe
-            # WinError 32: Sharing violation / lock temporário de sincronização (Dropbox/OneDrive)
-            if getattr(pe, 'winerror', None) == 32:
+            # WinError 32: lock temporário de sincronização em nuvem (Dropbox/OneDrive)
+            if getattr(pe, 'winerror', None) == 32 and attempt < max_retries - 1:
                 time.sleep(delay * (attempt + 1))
                 continue
-            else:
-                break
+            break
         except OSError as oe:
             last_err = oe
             win_err = getattr(oe, 'winerror', None)
             err_no = getattr(oe, 'errno', None)
+            if win_err == 32 and attempt < max_retries - 1:
+                time.sleep(delay * (attempt + 1))
+                continue
             if win_err == 206 or err_no == getattr(errno, 'ENAMETOOLONG', 36):
-                return False, f"Nome ou caminho do arquivo excede o limite do sistema (WinError 206 / MAX_PATH / 255 chars): {from_long_path(dst)}"
+                return False, f"Nome ou caminho do arquivo excede o limite do sistema (WinError 206 / MAX_PATH / 255 chars): {clean_dst}"
             if win_err == 123:
-                return False, f"Sintaxe ou caracteres de nome de arquivo não suportados pela unidade destino (WinError 123): {from_long_path(dst)}"
+                return False, f"Sintaxe ou caracteres de nome de arquivo não suportados pela unidade destino (WinError 123): {clean_dst}"
             if win_err in (53, 64, 121, 1231):
-                return False, f"Falha de rede no NAS (WinError {win_err}): Servidor inacessível"
+                return False, f"Falha de rede no NAS (WinError {win_err}): Servidor inacessível ou conexão instável"
             time.sleep(delay)
         except Exception as e:
             last_err = e
             break
 
-    err_msg = str(last_err)
-    if getattr(last_err, 'winerror', None) == 32:
-        err_msg = "Arquivo bloqueado temporariamente pela sincronização da Nuvem (Dropbox/OneDrive)"
-    elif getattr(last_err, 'winerror', None) == 206:
-        err_msg = "Tamanho do caminho ou nome de arquivo excede o limite permitido pelo sistema de arquivos (WinError 206)"
-    return False, err_msg
+    win_err = getattr(last_err, 'winerror', None)
+    if win_err == 32:
+        return False, "Arquivo bloqueado temporariamente pela sincronização da Nuvem (Dropbox/OneDrive)"
+    if win_err == 87:
+        return False, "Parâmetro incorreto do sistema de arquivos (WinError 87: controladora de rede/NAS ou atributos não suportados)"
+    if win_err == 206:
+        return False, "Tamanho do caminho ou nome de arquivo excede o limite permitido pelo sistema de arquivos (WinError 206)"
+    if win_err == 5:
+        return False, "Acesso negado no destino (permissão insuficiente ou arquivo somente-leitura travado)"
+    return False, str(last_err)
 
 
 # ==========================================
@@ -654,6 +1062,7 @@ class CalendarDialog(tk.Toplevel):
         self.destroy()
 
 
+
 # ==========================================
 # WIDGET: MODAL PARA DEFINIR NOME DA UNIDADE DE REDE
 # ==========================================
@@ -822,10 +1231,12 @@ class DriveCustomizeDialog(tk.Toplevel):
         self.grab_release()
         self.destroy()
 
+
     def on_cancel(self):
         self.result = None
         self.grab_release()
         self.destroy()
+
 
 
 DriveLabelDialog = DriveCustomizeDialog
@@ -1112,6 +1523,7 @@ class FlowFrame(tk.Frame):
         self.flow_pady = pady
         self.flow_widgets = []
         self._last_flow_width = 0
+        self._reflow_after_id = None
         self.bind("<Configure>", self._on_flow_configure)
 
     def add_widget(self, widget):
@@ -1143,11 +1555,21 @@ class FlowFrame(tk.Frame):
             current_x += req_w + (self.flow_padx * 2)
             col += 1
 
+    def _run_debounced_reflow(self, width):
+        self._reflow_after_id = None
+        self.reflow(width)
+
     def _on_flow_configure(self, event):
         if event.widget is not self:
             return
         if abs(event.width - self._last_flow_width) >= 2:
-            self.reflow(event.width)
+            if self._reflow_after_id is not None:
+                try:
+                    self.after_cancel(self._reflow_after_id)
+                except Exception:
+                    pass
+            w = event.width
+            self._reflow_after_id = self.after(45, lambda width=w: self._run_debounced_reflow(width))
 
 
 
@@ -1197,6 +1619,9 @@ class App(tk.Tk):
         self.diff_stop_event = threading.Event()
         self.diff_is_copying = False
         self.diff_stop_copy_event = threading.Event()
+        self._diff_search_after_id = None
+        self._diff_render_after_id = None
+        self._diff_render_token = 0
 
         # Variáveis do Módulo 2: Mapeador de Unidades de Rede
         self.var_netdrive_letter = tk.StringVar(value="Z:")
@@ -2190,9 +2615,10 @@ class App(tk.Tk):
             if not confirm:
                 self.var_bypass_protection.set(False)
 
-    def log_clean(self, msg, tag="normal"):
+    def log_clean(self, msg, tag="normal", scroll=True):
         self.clean_terminal.insert(tk.END, msg + "\n", tag)
-        self.clean_terminal.see(tk.END)
+        if scroll:
+            self.clean_terminal.see(tk.END)
 
     def is_protected_path(self, path):
         # Se o bypass manual estiver ativo na interface, ignora a restrição
@@ -2415,9 +2841,10 @@ class App(tk.Tk):
         if dir_selected:
             self.var_bkp_dst.set(os.path.normpath(dir_selected))
 
-    def log_bkp(self, msg, tag="normal"):
+    def log_bkp(self, msg, tag="normal", scroll=True):
         self.bkp_terminal.insert(tk.END, msg + "\n", tag)
-        self.bkp_terminal.see(tk.END)
+        if scroll:
+            self.bkp_terminal.see(tk.END)
 
     def warn_mirror_mode(self):
         if self.var_bkp_mirror.get():
@@ -2752,9 +3179,10 @@ class App(tk.Tk):
         if dir_selected:
             self.var_renamer_dir.set(os.path.normpath(dir_selected))
 
-    def log_renamer(self, msg, tag="normal"):
+    def log_renamer(self, msg, tag="normal", scroll=True):
         self.renamer_terminal.insert(tk.END, msg + "\n", tag)
-        self.renamer_terminal.see(tk.END)
+        if scroll:
+            self.renamer_terminal.see(tk.END)
 
     def validate_renamer_inputs(self):
         target = self.var_renamer_dir.get().strip()
@@ -3380,7 +3808,7 @@ class App(tk.Tk):
             return False
 
     @staticmethod
-    def get_file_dates(filepath):
+    def get_file_dates(filepath, stat_result=None):
         """
         Retorna (creation_date, modification_date) de forma compatível e resiliente com Windows e macOS.
         No macOS, st_birthtime obtém a data de criação nativa.
@@ -3388,7 +3816,7 @@ class App(tk.Tk):
         st_mtime obtém a data de gravação original pelo gravador ou câmera (essencial para volumes exFAT/FAT).
         """
         try:
-            st = os.stat(to_long_path(filepath))
+            st = stat_result if stat_result is not None else os.stat(to_long_path(filepath))
             m_date = None
             c_date = None
 
@@ -3444,9 +3872,10 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def log_card_copy(self, msg, tag="normal"):
+    def log_card_copy(self, msg, tag="normal", scroll=True):
         self.card_terminal.insert(tk.END, msg + "\n", tag)
-        self.card_terminal.see(tk.END)
+        if scroll:
+            self.card_terminal.see(tk.END)
 
     def prompt_conflict_resolution(self, filename, subfolder, src_path, dst_path):
         """Dispara diálogo modal thread-safe para resolução de conflitos de arquivo"""
@@ -3738,8 +4167,9 @@ class App(tk.Tk):
                     if match_all or ext in selected_exts:
                         full_path = os.path.join(root, f)
                         try:
-                            c_date, m_date = self.get_file_dates(full_path)
-                            sz = os.path.getsize(to_long_path(full_path))
+                            st = os.stat(to_long_path(full_path))
+                            c_date, m_date = self.get_file_dates(full_path, stat_result=st)
+                            sz = st.st_size
                             effective_date = m_date or c_date
                             d_str = effective_date.strftime("%d/%m/%Y") if effective_date else "N/A"
                             file_entry = (full_path, subfolder_name, f, sz, d_str)
@@ -4241,7 +4671,7 @@ class App(tk.Tk):
         lbl_search.pack(side=tk.LEFT, padx=(4, 4))
         entry_search = tk.Entry(f_search, textvariable=self.diff_search_query, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY, bd=1, relief="solid", insertbackground=COLOR_TEXT_PRIMARY, font=("Segoe UI", 8), width=14)
         entry_search.pack(side=tk.LEFT, padx=2)
-        entry_search.bind("<KeyRelease>", lambda e: self.filter_diff_results())
+        entry_search.bind("<KeyRelease>", lambda e: self._schedule_diff_filter())
         toolbar.add_widget(f_search)
 
         # Botões de transferência rápida
@@ -4382,6 +4812,13 @@ class App(tk.Tk):
         self.lbl_diff_status.config(text="Iniciando varredura e comparação...")
 
         # Limpa árvore e resultados anteriores
+        self._diff_render_token = getattr(self, "_diff_render_token", 0) + 1
+        if getattr(self, "_diff_render_after_id", None) is not None:
+            try:
+                self.after_cancel(self._diff_render_after_id)
+            except Exception:
+                pass
+            self._diff_render_after_id = None
         self.diff_tree.delete(*self.diff_tree.get_children())
         self.diff_results = []
         self.diff_filtered_results = []
@@ -4424,291 +4861,30 @@ class App(tk.Tk):
             except Exception:
                 tolerance = 2.0
 
-            # Validação e tratamento de erros de rede/NAS ou pastas inacessíveis
-            for d_name, d_path in [("Pasta A", dir_a), ("Pasta B", dir_b)]:
-                try:
-                    if not os.path.exists(d_path):
-                        raise FileNotFoundError(f"{d_name} não foi encontrada ou o servidor está inacessível: {d_path}")
-                except OSError as oe:
-                    win_err = getattr(oe, 'winerror', None)
-                    if win_err in (53, 64, 121, 1231):
-                        raise OSError(f"Falha de comunicação com o NAS na {d_name} (WinError {win_err}): Servidor de rede inacessível ou conexão instável.")
-                    raise
+            results = _compute_diff_results(
+                dir_a, dir_b,
+                cmp_size=cmp_size,
+                cmp_mtime=cmp_mtime,
+                cmp_ctime=cmp_ctime,
+                cmp_name=cmp_name,
+                cmp_integrity=cmp_integrity,
+                recursive=recursive,
+                ignore_hidden=ignore_hidden,
+                tolerance=tolerance,
+                stop_event=self.diff_stop_event,
+                status_callback=lambda msg: self.after(0, lambda m=msg: self.lbl_diff_status.config(text=m))
+            )
 
-            # Função segura para leitura de metadados com resiliência a caminhos longos e locks de sincronização de nuvem
-            def safe_read_metadata(full_path):
-                lp_path = to_long_path(full_path)
-                for attempt in range(3):
-                    try:
-                        st = os.stat(lp_path)
-                        ctime = getattr(st, "st_birthtime", st.st_ctime)
-                        cloud_status = check_cloud_file_attributes(lp_path)
-                        return {
-                            "size": st.st_size,
-                            "mtime": st.st_mtime,
-                            "ctime": ctime,
-                            "path": full_path,
-                            "cloud_status": cloud_status
-                        }
-                    except PermissionError as pe:
-                        # WinError 32: arquivo temporariamente bloqueado por Dropbox ou OneDrive
-                        if getattr(pe, 'winerror', None) == 32 and attempt < 2:
-                            time.sleep(0.12)
-                            continue
-                        return {
-                            "size": 0, "mtime": 0, "ctime": 0, "path": full_path,
-                            "cloud_status": "Bloqueado por Sincronização em Nuvem"
-                        }
-                    except OSError as oe:
-                        win_err = getattr(oe, 'winerror', None)
-                        err_no = getattr(oe, 'errno', None)
-                        if win_err == 206 or err_no == getattr(errno, 'ENAMETOOLONG', 36):
-                            return {
-                                "size": 0, "mtime": 0, "ctime": 0, "path": full_path,
-                                "cloud_status": "Caminho longo excede MAX_PATH (WinError 206)"
-                            }
-                        return None
-                    except Exception:
-                        return None
-                return None
-
-            badge_a, _, _, is_nas_a, _ = get_path_storage_info(dir_a)
-            self.after(0, lambda: self.lbl_diff_status.config(text=f"Varrendo Pasta A ({badge_a})..."))
-            files_a = {}
-            if recursive:
-                for root, dirs, files in os.walk(dir_a):
-                    if self.diff_stop_event.is_set():
-                        break
-                    for f in files:
-                        if ignore_hidden and (f.startswith(".") or f.lower() in ("thumbs.db", "desktop.ini")):
-                            continue
-                        full_p = os.path.join(root, f)
-                        try:
-                            rel_p = safe_relpath(full_p, dir_a).replace("\\", "/")
-                            meta = safe_read_metadata(full_p)
-                            if meta:
-                                meta["rel_path"] = rel_p
-                                files_a[rel_p.lower()] = meta
-                        except Exception:
-                            pass
-            else:
-                try:
-                    for entry in os.scandir(dir_a):
-                        if self.diff_stop_event.is_set():
-                            break
-                        if entry.is_file():
-                            if ignore_hidden and (entry.name.startswith(".") or entry.name.lower() in ("thumbs.db", "desktop.ini")):
-                                continue
-                            try:
-                                meta = safe_read_metadata(entry.path)
-                                if meta:
-                                    meta["rel_path"] = entry.name
-                                    files_a[entry.name.lower()] = meta
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            if self.diff_stop_event.is_set():
+            if results is None or self.diff_stop_event.is_set():
                 self.after(0, lambda: self._on_diff_finished(interrupted=True))
                 return
-
-            badge_b, _, _, is_nas_b, _ = get_path_storage_info(dir_b)
-            self.after(0, lambda: self.lbl_diff_status.config(text=f"Varrendo Pasta B ({badge_b})..."))
-            files_b = {}
-            if recursive:
-                for root, dirs, files in os.walk(dir_b):
-                    if self.diff_stop_event.is_set():
-                        break
-                    for f in files:
-                        if ignore_hidden and (f.startswith(".") or f.lower() in ("thumbs.db", "desktop.ini")):
-                            continue
-                        full_p = os.path.join(root, f)
-                        try:
-                            rel_p = safe_relpath(full_p, dir_b).replace("\\", "/")
-                            meta = safe_read_metadata(full_p)
-                            if meta:
-                                meta["rel_path"] = rel_p
-                                files_b[rel_p.lower()] = meta
-                        except Exception:
-                            pass
-            else:
-                try:
-                    for entry in os.scandir(dir_b):
-                        if self.diff_stop_event.is_set():
-                            break
-                        if entry.is_file():
-                            if ignore_hidden and (entry.name.startswith(".") or entry.name.lower() in ("thumbs.db", "desktop.ini")):
-                                continue
-                            try:
-                                meta = safe_read_metadata(entry.path)
-                                if meta:
-                                    meta["rel_path"] = entry.name
-                                    files_b[entry.name.lower()] = meta
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            if self.diff_stop_event.is_set():
-                self.after(0, lambda: self._on_diff_finished(interrupted=True))
-                return
-
-            self.after(0, lambda: self.lbl_diff_status.config(text="Comparando metadados e analisando divergências..."))
-
-            all_keys = sorted(set(files_a.keys()) | set(files_b.keys()))
-            results = []
-
-            for key in all_keys:
-                if self.diff_stop_event.is_set():
-                    break
-
-                in_a = key in files_a
-                in_b = key in files_b
-
-                if in_a and not in_b:
-                    info_a = files_a[key]
-                    det = "Não existe na Pasta B"
-                    if info_a.get("cloud_status"):
-                        det += f" [☁ {info_a['cloud_status']}]"
-                    results.append({
-                        "status": "only_a",
-                        "status_text": "Apenas em A",
-                        "rel_path": info_a["rel_path"],
-                        "size_a": info_a["size"],
-                        "size_b": None,
-                        "mtime_a": info_a["mtime"],
-                        "mtime_b": None,
-                        "details": det,
-                        "path_a": info_a["path"],
-                        "path_b": None
-                    })
-                elif in_b and not in_a:
-                    info_b = files_b[key]
-                    det = "Não existe na Pasta A"
-                    if info_b.get("cloud_status"):
-                        det += f" [☁ {info_b['cloud_status']}]"
-                    results.append({
-                        "status": "only_b",
-                        "status_text": "Apenas em B",
-                        "rel_path": info_b["rel_path"],
-                        "size_a": None,
-                        "size_b": info_b["size"],
-                        "mtime_a": None,
-                        "mtime_b": info_b["mtime"],
-                        "details": det,
-                        "path_a": None,
-                        "path_b": info_b["path"]
-                    })
-                else:
-                    info_a = files_a[key]
-                    info_b = files_b[key]
-                    rel_p = info_a["rel_path"]
-                    diff_reasons = []
-
-                    # Comparação de Nome (caso o usuário queira verificar diferença de caixa alta/baixa ou grafia)
-                    if cmp_name and info_a["rel_path"] != info_b["rel_path"]:
-                        name_a = os.path.basename(info_a["rel_path"])
-                        name_b = os.path.basename(info_b["rel_path"])
-                        diff_reasons.append(f"🔤 Nome/Caixa ({name_a} vs {name_b})")
-
-                    dt_diff = info_a["mtime"] - info_b["mtime"]
-                    size_diff = info_a["size"] - info_b["size"]
-
-                    newer_folder = "A" if dt_diff > tolerance else ("B" if dt_diff < -tolerance else "equal")
-                    if newer_folder == "A":
-                        newer_str = f"A é mais recente (+{format_timedelta_human(dt_diff)})"
-                    elif newer_folder == "B":
-                        newer_str = f"B é mais recente (+{format_timedelta_human(-dt_diff)})"
-                    else:
-                        newer_str = "Mesma data"
-
-                    if size_diff > 0:
-                        size_str = f"A é maior (+{format_size(size_diff)})"
-                    elif size_diff < 0:
-                        size_str = f"B é maior (+{format_size(-size_diff)})"
-                    else:
-                        size_str = "Mesmo tamanho"
-
-                    if cmp_mtime and newer_folder != "equal":
-                        diff_reasons.append(f"🕒 {newer_str}")
-
-                    if cmp_size and info_a["size"] != info_b["size"]:
-                        diff_reasons.append(f"📦 {size_str}")
-
-                    if cmp_ctime and abs(info_a["ctime"] - info_b["ctime"]) > tolerance:
-                        ct_a = datetime.datetime.fromtimestamp(info_a["ctime"]).strftime("%d/%m/%Y %H:%M")
-                        ct_b = datetime.datetime.fromtimestamp(info_b["ctime"]).strftime("%d/%m/%Y %H:%M")
-                        diff_reasons.append(f"📅 Criação ({ct_a} vs {ct_b})")
-
-                    # Verificação de Integridade do Conteúdo (Hash SHA-256)
-                    if cmp_integrity:
-                        if info_a["size"] != info_b["size"]:
-                            if not cmp_size:
-                                diff_reasons.append("⚠ Conteúdo divergente (tamanhos distintos)")
-                        elif info_a["size"] == 0:
-                            pass
-                        else:
-                            filename_disp = os.path.basename(rel_p)
-                            self.after(0, lambda fn=filename_disp: self.lbl_diff_status.config(
-                                text=f"Checando integridade (SHA-256): {fn}..."
-                            ))
-                            hash_a, err_a = safe_compute_file_hash(info_a["path"], stop_event=self.diff_stop_event)
-                            if self.diff_stop_event.is_set():
-                                break
-                            if err_a:
-                                diff_reasons.append(f"❌ Erro leitura Pasta A: {err_a}")
-                            else:
-                                hash_b, err_b = safe_compute_file_hash(info_b["path"], stop_event=self.diff_stop_event)
-                                if self.diff_stop_event.is_set():
-                                    break
-                                if err_b:
-                                    diff_reasons.append(f"❌ Erro leitura Pasta B: {err_b}")
-                                elif hash_a != hash_b:
-                                    diff_reasons.append("⚠ Integridade violada / Hash SHA-256 divergente")
-
-                    if info_a.get("cloud_status"):
-                        diff_reasons.append(f"[☁ A: {info_a['cloud_status']}]")
-                    if info_b.get("cloud_status"):
-                        diff_reasons.append(f"[☁ B: {info_b['cloud_status']}]")
-
-                    if diff_reasons:
-                        results.append({
-                            "status": "diff",
-                            "status_text": "Diferente",
-                            "rel_path": rel_p,
-                            "size_a": info_a["size"],
-                            "size_b": info_b["size"],
-                            "mtime_a": info_a["mtime"],
-                            "mtime_b": info_b["mtime"],
-                            "newer_folder": newer_folder,
-                            "newer_desc": newer_str,
-                            "size_desc": size_str,
-                            "details": " | ".join(diff_reasons),
-                            "path_a": info_a["path"],
-                            "path_b": info_b["path"]
-                        })
-                    else:
-                        match_detail = "Metadados e integridade (SHA-256) coincidem" if cmp_integrity else "Metadados selecionados coincidem"
-                        results.append({
-                            "status": "match",
-                            "status_text": "Idêntico",
-                            "rel_path": rel_p,
-                            "size_a": info_a["size"],
-                            "size_b": info_b["size"],
-                            "mtime_a": info_a["mtime"],
-                            "mtime_b": info_b["mtime"],
-                            "details": match_detail,
-                            "path_a": info_a["path"],
-                            "path_b": info_b["path"]
-                        })
 
             self.diff_results = results
             elapsed = time.time() - start_time
             self.after(0, lambda: self._on_diff_finished(interrupted=False, elapsed=elapsed))
 
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Erro na Comparação", f"Falha durante a varredura:\n{str(e)}", parent=self))
+            self.after(0, lambda err_msg=str(e): messagebox.showerror("Erro na Comparação", f"Falha durante a varredura:\n{err_msg}", parent=self))
             self.after(0, lambda: self._on_diff_finished(interrupted=True))
 
     def _on_diff_finished(self, interrupted=False, elapsed=0.0):
@@ -4774,7 +4950,35 @@ class App(tk.Tk):
                 btn.config(bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY)
         self.filter_diff_results()
 
+    def _schedule_diff_filter(self, delay_ms=180):
+        if getattr(self, "_diff_search_after_id", None) is not None:
+            try:
+                self.after_cancel(self._diff_search_after_id)
+            except Exception:
+                pass
+        self._diff_search_after_id = self.after(delay_ms, self._run_debounced_diff_filter)
+
+    def _run_debounced_diff_filter(self):
+        self._diff_search_after_id = None
+        self.filter_diff_results()
+
     def filter_diff_results(self):
+        if getattr(self, "_diff_search_after_id", None) is not None:
+            try:
+                self.after_cancel(self._diff_search_after_id)
+            except Exception:
+                pass
+            self._diff_search_after_id = None
+
+        self._diff_render_token = getattr(self, "_diff_render_token", 0) + 1
+        token = self._diff_render_token
+        if getattr(self, "_diff_render_after_id", None) is not None:
+            try:
+                self.after_cancel(self._diff_render_after_id)
+            except Exception:
+                pass
+            self._diff_render_after_id = None
+
         query = self.diff_search_query.get().strip().lower()
         active = self.diff_active_filter
 
@@ -4784,23 +4988,63 @@ class App(tk.Tk):
         for item in self.diff_results:
             if active != "all" and item["status"] != active:
                 continue
-            if query and (query not in item["rel_path"].lower() and query not in item["details"].lower()):
-                continue
+            if query:
+                blob = item.get("_search_blob")
+                if blob is None:
+                    blob = f"{item['rel_path']}\n{item['details']}".lower()
+                    item["_search_blob"] = blob
+                if query not in blob:
+                    continue
             filtered.append(item)
 
-        for item in filtered:
-            sa = format_size(item["size_a"]) if item["size_a"] is not None else "-"
-            sb = format_size(item["size_b"]) if item["size_b"] is not None else "-"
-            ma = datetime.datetime.fromtimestamp(item["mtime_a"]).strftime("%d/%m/%Y %H:%M") if item["mtime_a"] is not None else "-"
-            mb = datetime.datetime.fromtimestamp(item["mtime_b"]).strftime("%d/%m/%Y %H:%M") if item["mtime_b"] is not None else "-"
+        self.diff_filtered_results = filtered
+        total_results = len(self.diff_results)
+        total_filtered = len(filtered)
+        if total_filtered == 0:
+            self.lbl_diff_tree_status.config(text=f"Exibindo 0 de {total_results} itens.")
+            return
 
-            self.diff_tree.insert(
+        self.lbl_diff_tree_status.config(text=f"Carregando {total_filtered} de {total_results} itens...")
+        self._render_diff_chunk(filtered, 0, token, total_results)
+
+    def _render_diff_chunk(self, filtered, start_idx, token, total_results, chunk_size=300):
+        if token != getattr(self, "_diff_render_token", 0):
+            return
+        self._diff_render_after_id = None
+        end_idx = min(start_idx + chunk_size, len(filtered))
+        tree = self.diff_tree
+
+        for item in filtered[start_idx:end_idx]:
+            sa = item.get("_size_a_str")
+            if sa is None:
+                sa = format_size(item["size_a"]) if item["size_a"] is not None else "-"
+                item["_size_a_str"] = sa
+            sb = item.get("_size_b_str")
+            if sb is None:
+                sb = format_size(item["size_b"]) if item["size_b"] is not None else "-"
+                item["_size_b_str"] = sb
+            ma = item.get("_mtime_a_str")
+            if ma is None:
+                ma = datetime.datetime.fromtimestamp(item["mtime_a"]).strftime("%d/%m/%Y %H:%M") if item["mtime_a"] is not None else "-"
+                item["_mtime_a_str"] = ma
+            mb = item.get("_mtime_b_str")
+            if mb is None:
+                mb = datetime.datetime.fromtimestamp(item["mtime_b"]).strftime("%d/%m/%Y %H:%M") if item["mtime_b"] is not None else "-"
+                item["_mtime_b_str"] = mb
+
+            tree.insert(
                 "", tk.END,
                 values=(item["status_text"], item["rel_path"], sa, sb, ma, mb, item["details"]),
                 tags=(item["status"],)
             )
 
-        self.lbl_diff_tree_status.config(text=f"Exibindo {len(filtered)} de {len(self.diff_results)} itens.")
+        if end_idx < len(filtered):
+            self.lbl_diff_tree_status.config(text=f"Exibindo {end_idx} de {total_results} itens (filtrados: {len(filtered)})...")
+            self._diff_render_after_id = self.after(
+                1, lambda: self._render_diff_chunk(filtered, end_idx, token, total_results, chunk_size)
+            )
+        else:
+            self.lbl_diff_tree_status.config(text=f"Exibindo {len(filtered)} de {total_results} itens.")
 
     def show_diff_context_menu(self, event):
         """Abre o menu contextual na linha onde o usuário clicou com o botão direito"""
@@ -5003,9 +5247,10 @@ class App(tk.Tk):
 
         threading.Thread(target=self._copy_worker, args=(items_to_copy, src_dir, dst_dir, direction), daemon=True).start()
 
-    def _copy_worker(self, items_to_copy, src_dir, dst_dir, direction):
+    def _copy_worker(self, items_to_copy, src_dir, dst_dir, direction, force_override=False):
         total = len(items_to_copy)
         success_count = 0
+        successful_items = []
         errors = []
 
         for i, item in enumerate(items_to_copy, 1):
@@ -5021,17 +5266,18 @@ class App(tk.Tk):
             ))
 
             try:
-                ok, err = safe_copy_file_resilient(src_file, dst_file)
+                ok, err = safe_copy_file_resilient(src_file, dst_file, force_override=force_override)
                 if ok:
                     success_count += 1
+                    successful_items.append(item)
                 else:
-                    errors.append((rel_p, err))
+                    errors.append((rel_p, err, item))
             except Exception as e:
-                errors.append((rel_p, str(e)))
+                errors.append((rel_p, str(e), item))
 
-        self.after(0, lambda: self._on_copy_finished(success_count, total, errors, direction))
+        self.after(0, lambda: self._on_copy_finished(success_count, total, errors, direction, successful_items, src_dir, dst_dir))
 
-    def _on_copy_finished(self, success_count, total, errors, direction):
+    def _on_copy_finished(self, success_count, total, errors, direction, successful_items, src_dir, dst_dir):
         self.diff_is_copying = False
         self.diff_progress.stop()
         self.btn_diff_start.config(state="normal")
@@ -5041,27 +5287,125 @@ class App(tk.Tk):
         if hasattr(self, 'btn_copy_b_to_a'):
             self.btn_copy_b_to_a.config(state="normal")
 
+        # 1. Atualização cirúrgica in-place APENAS dos arquivos copiados (sem re-varredura completa de pastas)
+        if successful_items:
+            self._update_copied_items_in_diff(successful_items, src_dir, dst_dir, direction)
+
+        # 2. Exibição de resultados e diálogo completo com opções de override caso haja erros
         if errors:
-            err_sample = "\n".join([f"• {p}: {msg}" for p, msg in errors[:6]])
-            if len(errors) > 6:
-                err_sample += f"\n... e mais {len(errors) - 6} arquivo(s) com erro."
-            messagebox.showwarning(
-                "Cópia Concluída com Alertas",
-                f"Transferência concluída com algumas pendências:\n\n"
-                f"✅ Sucesso: {success_count} de {total} arquivo(s).\n"
-                f"⚠ Ocorrências: {len(errors)} falha(s).\n\n"
-                f"Possíveis causas (Locks de sincronização em nuvem, limites de caminho/nome ou latência de NAS):\n{err_sample}",
-                parent=self
+            DiffCopyErrorsDialog(
+                self, errors, src_dir, dst_dir, direction,
+                retry_callback=self._retry_failed_diff_copies
             )
         else:
+            self.lbl_diff_status.config(text=f"Transferência concluída: {success_count} de {total} arquivo(s) sincronizado(s).")
             messagebox.showinfo(
                 "Cópia Concluída com Sucesso",
-                f"Todos os {success_count} arquivo(s) foram copiados com sucesso!",
+                f"Todos os {success_count} arquivo(s) foram copiados com sucesso e atualizados na tabela!",
                 parent=self
             )
 
-        # Atualiza a análise automaticamente após a transferência
-        self.start_diff_comparison()
+    def _update_copied_items_in_diff(self, successful_items, src_dir, dst_dir, direction):
+        """
+        Atualiza em tempo real e cirurgicamente apenas os arquivos transferidos em self.diff_results,
+        evitando uma nova varredura de disco completa que em pastas grandes pode demorar horas.
+        """
+        if not successful_items:
+            return
+
+        copied_map = {item["rel_path"].lower(): item for item in successful_items}
+
+        for r in self.diff_results:
+            key = r["rel_path"].lower()
+            if key in copied_map:
+                rel_p = r["rel_path"]
+                if direction == "a_to_b":
+                    dst_path = os.path.join(dst_dir, rel_p.replace("/", os.sep))
+                    try:
+                        st = os.stat(to_long_path(dst_path))
+                        r["size_b"] = st.st_size
+                        r["mtime_b"] = st.st_mtime
+                    except Exception:
+                        r["size_b"] = r.get("size_a")
+                        r["mtime_b"] = r.get("mtime_a")
+                    r["path_b"] = dst_path
+                    r["status"] = "match"
+                    r["status_text"] = "Idêntico"
+                    r["details"] = "Metadados sincronizados após transferência (A ➜ B)"
+
+                elif direction == "b_to_a":
+                    dst_path = os.path.join(dst_dir, rel_p.replace("/", os.sep))
+                    try:
+                        st = os.stat(to_long_path(dst_path))
+                        r["size_a"] = st.st_size
+                        r["mtime_a"] = st.st_mtime
+                    except Exception:
+                        r["size_a"] = r.get("size_b")
+                        r["mtime_a"] = r.get("mtime_b")
+                    r["path_a"] = dst_path
+                    r["status"] = "match"
+                    r["status_text"] = "Idêntico"
+                    r["details"] = "Metadados sincronizados após transferência (B ➜ A)"
+
+                for cache_key in ("_size_a_str", "_size_b_str", "_mtime_a_str", "_mtime_b_str", "_search_blob"):
+                    r.pop(cache_key, None)
+
+        # Recalcula estatísticas
+        total = len(self.diff_results)
+        cnt_diff = sum(1 for r in self.diff_results if r["status"] == "diff")
+        cnt_only_a = sum(1 for r in self.diff_results if r["status"] == "only_a")
+        cnt_only_b = sum(1 for r in self.diff_results if r["status"] == "only_b")
+        cnt_match = sum(1 for r in self.diff_results if r["status"] == "match")
+
+        self.lbl_diff_count_total.config(text=str(total))
+        self.lbl_diff_count_diff.config(text=str(cnt_diff))
+        self.lbl_diff_count_only_a.config(text=str(cnt_only_a))
+        self.lbl_diff_count_only_b.config(text=str(cnt_only_b))
+        self.lbl_diff_count_match.config(text=str(cnt_match))
+
+        self.btn_filter_all.config(text=f"Todos ({total})")
+        self.btn_filter_diff.config(text=f"Diferentes ({cnt_diff})")
+        self.btn_filter_only_a.config(text=f"Apenas em A ({cnt_only_a})")
+        self.btn_filter_only_b.config(text=f"Apenas em B ({cnt_only_b})")
+        self.btn_filter_match.config(text=f"Idênticos ({cnt_match})")
+
+        if hasattr(self, 'btn_copy_a_to_b'):
+            self.btn_copy_a_to_b.config(text=f"Copiar Faltantes: A ➜ B ({cnt_only_a})")
+        if hasattr(self, 'btn_copy_b_to_a'):
+            self.btn_copy_b_to_a.config(text=f"Copiar Faltantes: B ➜ A ({cnt_only_b})")
+        if hasattr(self, 'btn_tb_copy_a_to_b'):
+            self.btn_tb_copy_a_to_b.config(text=f"Copiar A ➜ B ({cnt_only_a})")
+        if hasattr(self, 'btn_tb_copy_b_to_a'):
+            self.btn_tb_copy_b_to_a.config(text=f"Copiar B ➜ A ({cnt_only_b})")
+
+        if hasattr(self, 'diff_toolbar') and hasattr(self.diff_toolbar, 'reflow'):
+            self.after_idle(self.diff_toolbar.reflow)
+
+        self.lbl_diff_status.config(text=f"Transferência concluída: {len(successful_items)} arquivo(s) atualizados na lista.")
+        self.filter_diff_results()
+
+    def _retry_failed_diff_copies(self, items_to_retry, src_dir, dst_dir, direction):
+        """Reexecuta a cópia apenas dos arquivos que falharam, ativando o modo de override avançado"""
+        if self.diff_is_running or getattr(self, "diff_is_copying", False):
+            messagebox.showwarning("Aviso", "Uma operação já está em andamento. Aguarde.", parent=self)
+            return
+
+        self.diff_is_copying = True
+        self.diff_stop_copy_event.clear()
+        self.diff_progress.start(10)
+        self.btn_diff_start.config(state="disabled")
+        self.btn_diff_cancel.config(state="normal")
+        if hasattr(self, 'btn_copy_a_to_b'):
+            self.btn_copy_a_to_b.config(state="disabled")
+        if hasattr(self, 'btn_copy_b_to_a'):
+            self.btn_copy_b_to_a.config(state="disabled")
+
+        threading.Thread(
+            target=self._copy_worker,
+            args=(items_to_retry, src_dir, dst_dir, direction),
+            kwargs={"force_override": True},
+            daemon=True
+        ).start()
 
     def open_diff_selected_file(self):
         selected = self.diff_tree.selection()
@@ -5469,12 +5813,13 @@ class App(tk.Tk):
         self.var_netdrive_user.set("")
         self.var_netdrive_password.set("")
 
-    def log_netdrive(self, msg, tag="normal"):
+    def log_netdrive(self, msg, tag="normal", scroll=True):
         if hasattr(self, 'netdrive_terminal'):
             self.netdrive_terminal.config(state=tk.NORMAL)
             ts = datetime.datetime.now().strftime("[%H:%M:%S] ")
             self.netdrive_terminal.insert(tk.END, ts + msg + "\n", tag)
-            self.netdrive_terminal.see(tk.END)
+            if scroll:
+                self.netdrive_terminal.see(tk.END)
             self.netdrive_terminal.config(state=tk.DISABLED)
 
     def refresh_mapped_drives(self):
@@ -5925,50 +6270,59 @@ class App(tk.Tk):
     # AUXILIAR: CHECK LOOP DE CONTROLE DE THREADS (Thread-Safe GUI)
     # =========================================================================
     def check_queue_loop(self):
+        MAX_ITEMS_PER_TICK = 250
+        processed = 0
+        dirty_terminals = set()
         try:
-            while not self.log_queue.empty():
-                item = self.log_queue.get_nowait()
+            while processed < MAX_ITEMS_PER_TICK and not self.log_queue.empty():
+                try:
+                    item = self.log_queue.get_nowait()
+                except queue.Empty:
+                    break
+                processed += 1
                 try:
                     if isinstance(item, (tuple, list)) and len(item) == 3:
                         msg, tag, target = item
-                        if target == "cleaner":
-                            self.log_clean(msg, tag)
-                        elif target == "backup":
-                            self.log_bkp(msg, tag)
-                        elif target == "renamer":
-                            self.log_renamer(msg, tag)
-                        elif target == "card_copy":
-                            self.log_card_copy(msg, tag)
-                        elif target == "diff":
-                            self.log_diff(msg, tag)
-                        elif target == "netdrive":
-                            self.log_netdrive(msg, tag)
-                        else:
-                            self.log_clean(msg, tag)
                     else:
                         if isinstance(item, (tuple, list)) and len(item) == 2:
                             msg, tag = item
                         else:
                             msg, tag = str(item), "normal"
                         active_tab = self.notebook.index(self.notebook.select())
-                        if active_tab == 1: # Limpeza
-                            self.log_clean(msg, tag)
-                        elif active_tab == 2: # Backup
-                            self.log_bkp(msg, tag)
-                        elif active_tab == 3: # Renomeador
-                            self.log_renamer(msg, tag)
-                        elif active_tab == 4: # Copia do Cartão
-                            self.log_card_copy(msg, tag)
-                        elif active_tab == 5: # Comparar Pastas
-                            self.log_diff(msg, tag)
-                        elif active_tab == 6: # Unidades de Rede
-                            self.log_netdrive(msg, tag)
-                        else:
-                            self.log_clean(msg, tag)
+                        target_map = {1: "cleaner", 2: "backup", 3: "renamer", 4: "card_copy", 5: "diff", 6: "netdrive"}
+                        target = target_map.get(active_tab, "cleaner")
+
+                    if target == "cleaner":
+                        self.log_clean(msg, tag, scroll=False)
+                        dirty_terminals.add(self.clean_terminal)
+                    elif target == "backup":
+                        self.log_bkp(msg, tag, scroll=False)
+                        dirty_terminals.add(self.bkp_terminal)
+                    elif target == "renamer":
+                        self.log_renamer(msg, tag, scroll=False)
+                        dirty_terminals.add(self.renamer_terminal)
+                    elif target == "card_copy":
+                        self.log_card_copy(msg, tag, scroll=False)
+                        dirty_terminals.add(self.card_terminal)
+                    elif target == "diff":
+                        self.log_diff(msg, tag)
+                    elif target == "netdrive":
+                        self.log_netdrive(msg, tag, scroll=False)
+                        if hasattr(self, "netdrive_terminal"):
+                            dirty_terminals.add(self.netdrive_terminal)
+                    else:
+                        self.log_clean(msg, tag, scroll=False)
+                        dirty_terminals.add(self.clean_terminal)
+                except Exception:
+                    pass
+            for term in dirty_terminals:
+                try:
+                    term.see(tk.END)
                 except Exception:
                     pass
         finally:
-            self.after(100, self.check_queue_loop)
+            next_delay = 15 if not self.log_queue.empty() else 100
+            self.after(next_delay, self.check_queue_loop)
 
     # =========================================================================
     # AUXILIAR: MÉTODOS DE UX (ROW HOVER & FOLDER EXISTENCE CHECK)
@@ -6265,6 +6619,7 @@ class ConflictDialog(tk.Toplevel):
         self.grab_release()
         self.destroy()
 
+
 class AddFolderDialog(tk.Toplevel):
     def __init__(self, parent, existing_folders):
         super().__init__(parent)
@@ -6354,6 +6709,253 @@ class AddFolderDialog(tk.Toplevel):
         self.grab_release()
         self.destroy()
 
-if __name__ == "__main__":
+
+class DiffCopyErrorsDialog(tk.Toplevel):
+    def __init__(self, parent, errors, src_dir, dst_dir, direction, retry_callback=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.raw_errors = errors  # lista de tuplas (rel_path, error_msg, item_dict)
+        self.src_dir = src_dir
+        self.dst_dir = dst_dir
+        self.direction = direction
+        self.retry_callback = retry_callback
+        self.search_var = tk.StringVar(value="")
+
+        self.title("Falhas na Transferência de Arquivos — MPFolders")
+        self.geometry("840x540")
+        self.minsize(700, 420)
+        self.configure(bg=COLOR_BG_DARK)
+
+        # Centraliza modal
+        self.update_idletasks()
+        w, h = 840, 540
+        try:
+            x = max(10, parent.winfo_x() + (parent.winfo_width() - w) // 2)
+            y = max(10, parent.winfo_y() + (parent.winfo_height() - h) // 2)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
+
+        round_window_corners(self)
+        self.transient(parent)
+        self.grab_set()
+
+        # UI Header
+        header = tk.Frame(self, bg=COLOR_BG_CARD, padx=15, pady=10)
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text=f"⚠ Ocorrências na Transferência ({len(self.raw_errors)} falha(s))",
+            bg=COLOR_BG_CARD, fg=COLOR_WARNING, font=("Segoe UI", 11, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Os arquivos abaixo apresentaram erros durante a cópia. Inspecione a lista completa com barra de rolagem, copie os dados ou use 'Tentar Novamente com Override' para forçar a cópia contornando restrições de atributos ou erros de parâmetro.",
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 9), wraplength=800, justify="left"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Barra de Pesquisa e Contador
+        search_frame = tk.Frame(self, bg=COLOR_BG_DARK, padx=15, pady=8)
+        search_frame.pack(fill=tk.X)
+
+        tk.Label(search_frame, text="Buscar:", bg=COLOR_BG_DARK, fg=COLOR_TEXT_PRIMARY, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.entry_search = tk.Entry(
+            search_frame, textvariable=self.search_var, bg=COLOR_BG_INPUT, fg=COLOR_TEXT_PRIMARY,
+            insertbackground=COLOR_TEXT_PRIMARY, bd=1, relief="solid", font=("Segoe UI", 9), width=35
+        )
+        self.entry_search.pack(side=tk.LEFT, padx=(6, 12))
+        self.search_var.trace_add("write", lambda *args: self.filter_errors())
+
+        self.lbl_count = tk.Label(
+            search_frame, text=f"Exibindo {len(self.raw_errors)} de {len(self.raw_errors)} ocorrência(s)",
+            bg=COLOR_BG_DARK, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 9)
+        )
+        self.lbl_count.pack(side=tk.RIGHT)
+
+        # Tabela Treeview com scrollbars
+        table_frame = tk.Frame(self, bg=COLOR_BG_DARK, padx=15)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("idx", "path", "error")
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
+        self.tree.heading("idx", text="#", anchor="center")
+        self.tree.heading("path", text="Caminho Relativo do Arquivo", anchor="w")
+        self.tree.heading("error", text="Diagnóstico / Mensagem de Erro", anchor="w")
+
+        self.tree.column("idx", width=45, minwidth=40, stretch=False, anchor="center")
+        self.tree.column("path", width=330, minwidth=200, stretch=True, anchor="w")
+        self.tree.column("error", width=420, minwidth=250, stretch=True, anchor="w")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        self.tree.tag_configure("err", foreground=COLOR_DANGER)
+
+        # Menu de contexto
+        self.context_menu = tk.Menu(self, tearoff=0, bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY, activebackground=COLOR_ACCENT, activeforeground="#ffffff")
+        self.context_menu.add_command(label="Copiar Caminho do Arquivo", command=self.copy_selected_path)
+        self.context_menu.add_command(label="Copiar Mensagem de Erro", command=self.copy_selected_error)
+        self.context_menu.add_command(label="Copiar Linha Completa", command=self.copy_selected_row)
+        self.tree.bind("<Button-3>", self.show_context_menu)
+
+        # Botões de Ação na base
+        bottom_frame = tk.Frame(self, bg=COLOR_BG_DARK, padx=15, pady=10)
+        bottom_frame.pack(fill=tk.X)
+
+        btn_copy_all = HoverButton(
+            bottom_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Copiar Todos os Erros", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            bd=1, relief="solid", font=("Segoe UI", 9), command=self.copy_all_errors
+        )
+        btn_copy_all.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_export = HoverButton(
+            bottom_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Salvar Relatório (.txt)", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            bd=1, relief="solid", font=("Segoe UI", 9), command=self.export_errors_txt
+        )
+        btn_export.pack(side=tk.LEFT)
+
+        btn_close = RoundedButton(
+            bottom_frame, hover_bg=COLOR_BORDER, hover_fg=COLOR_TEXT_PRIMARY,
+            text="Fechar", bg=COLOR_BG_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 9), height=32, command=self.destroy
+        )
+        btn_close.pack(side=tk.RIGHT, padx=(6, 0))
+
+        if self.retry_callback:
+            btn_retry = RoundedButton(
+                bottom_frame, hover_bg=COLOR_ACCENT_HOVER, hover_fg="#ffffff",
+                text="Tentar Novamente com Override", bg=COLOR_ACCENT, fg="#ffffff",
+                font=("Segoe UI", 9, "bold"), height=32, command=self.on_retry
+            )
+            btn_retry.pack(side=tk.RIGHT)
+
+        self.filter_errors()
+
+    def filter_errors(self):
+        query = self.search_var.get().strip().lower()
+        self.tree.delete(*self.tree.get_children())
+        filtered = []
+        for idx, err_tuple in enumerate(self.raw_errors, 1):
+            rel_p = err_tuple[0]
+            err_msg = str(err_tuple[1])
+            if query and (query not in rel_p.lower() and query not in err_msg.lower()):
+                continue
+            filtered.append((idx, rel_p, err_msg))
+            self.tree.insert("", tk.END, values=(idx, rel_p, err_msg), tags=("err",))
+
+        self.lbl_count.config(text=f"Exibindo {len(filtered)} de {len(self.raw_errors)} ocorrência(s)")
+
+    def show_context_menu(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if item_id:
+            if item_id not in self.tree.selection():
+                self.tree.selection_set(item_id)
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+
+    def copy_selected_path(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if vals and len(vals) > 1:
+            self.clipboard_clear()
+            self.clipboard_append(str(vals[1]))
+
+    def copy_selected_error(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if vals and len(vals) > 2:
+            self.clipboard_clear()
+            self.clipboard_append(str(vals[2]))
+
+    def copy_selected_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if vals and len(vals) > 2:
+            self.clipboard_clear()
+            self.clipboard_append(f"{vals[1]} | {vals[2]}")
+
+    def copy_all_errors(self):
+        lines = [f"{err[0]}: {err[1]}" for err in self.raw_errors]
+        txt = "\n".join(lines)
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        messagebox.showinfo("Copiado", f"{len(self.raw_errors)} erro(s) copiados para a área de transferência.", parent=self)
+
+    def export_errors_txt(self):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Salvar Lista de Erros de Transferência (.txt)",
+            defaultextension=".txt",
+            filetypes=[("Arquivo de Texto", "*.txt"), ("Todos os Arquivos", "*.*")],
+            initialfile=f"Erros_Transferencia_{ts}.txt"
+        )
+        if not out_path:
+            return
+        try:
+            lines = [
+                f"# Relatório de Falhas de Transferência — MPFolders",
+                f"# Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                f"# Origem : {self.src_dir}",
+                f"# Destino: {self.dst_dir}",
+                f"# Direção: {self.direction}",
+                f"# Total de Falhas: {len(self.raw_errors)}",
+                "",
+                "-" * 70,
+                ""
+            ]
+            for idx, err in enumerate(self.raw_errors, 1):
+                lines.append(f"[{idx}] {err[0]}")
+                lines.append(f"    Erro: {err[1]}")
+                lines.append("")
+
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            messagebox.showinfo("Sucesso", f"Relatório salvo com sucesso em:\n{out_path}", parent=self)
+        except Exception as e:
+            messagebox.showerror("Erro ao Salvar", f"Falha ao gravar arquivo: {str(e)}", parent=self)
+
+    def on_retry(self):
+        if not self.retry_callback:
+            return
+        items_to_retry = [err[2] for err in self.raw_errors if len(err) > 2 and err[2]]
+        if not items_to_retry:
+            messagebox.showwarning("Aviso", "Nenhum item válido para reexecução.", parent=self)
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirmar Reexecução com Override",
+            f"Deseja tentar novamente a transferência de {len(items_to_retry)} arquivo(s)?\n\n"
+            f"O modo Override aplicará:\n"
+            f"• Remoção de atributos Read-Only no destino;\n"
+            f"• Fallback de caminhos diretos (contornando WinError 87 em unidades de rede/NAS);\n"
+            f"• Cópia em streaming binário tolerante a falhas de metadados;\n"
+            f"• Sanitização de caracteres/espaços em pastas.",
+            parent=self
+        )
+        if not confirm:
+            return
+
+        self.grab_release()
+        self.destroy()
+        self.retry_callback(items_to_retry, self.src_dir, self.dst_dir, self.direction)
+
+
+if __name__ == '__main__':
     app = App()
     app.mainloop()
